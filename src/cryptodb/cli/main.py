@@ -121,7 +121,8 @@ def bootstrap_admin(
 
     async def _run() -> None:
         await init_db()
-        async with AsyncSessionLocal() as session:
+        from cryptodb.db.connection import session_context
+        async with session_context() as session:
             from cryptodb.auth.users import create_user
             user = await create_user(session, username, password, role="admin")
             await session.commit()
@@ -176,6 +177,133 @@ def rotate_master_key(
     ks = MasterKeyStore()
     ks.rotate_master_key(old_passphrase, new_passphrase)
     typer.echo("Master key rotated successfully.")
+
+
+@app.command()
+def search(
+    field_name: str = typer.Argument(...),
+    token_plaintext: str = typer.Argument(...),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Search records by blind index."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        record_ids = await client.search(field_name, token_plaintext)
+        for rid in record_ids:
+            typer.echo(rid)
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def list_records(
+    page: int = typer.Option(1, "--page"),
+    page_size: int = typer.Option(20, "--page-size"),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """List accessible records."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        items = await client.list_records(page=page, page_size=page_size)
+        for item in items:
+            typer.echo(f"{item['id']} | owner:{item['owner_id'][:8]}... | {item['size_bytes']} bytes | {item['cipher_name']}")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def grant_access(
+    record_id: str = typer.Argument(...),
+    permission: str = typer.Argument(...),
+    user_id: str = typer.Option(None, "--user-id"),
+    role: str = typer.Option(None, "--role"),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Grant access to a record."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.grant_access(record_id, permission, user_id=user_id, role=role)
+        typer.echo(f"Granted: {result}")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def revoke_access(
+    record_id: str = typer.Argument(...),
+    grant_id: str = typer.Argument(...),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Revoke access to a record."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.revoke_access(record_id, grant_id)
+        typer.echo(f"Revoked: {result}")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def purge_deleted(
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Purge soft-deleted records older than retention period."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        # Placeholder: API endpoint for purge not yet implemented
+        typer.echo("Purge endpoint not yet implemented via API. Use direct DB access.")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def user_list(
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """List users (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        users = await client.list_users()
+        for u in users:
+            typer.echo(f"{u['id']} | {u['username']} | role:{u['role']} | active:{u['is_active']}")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def user_set_role(
+    user_id: str = typer.Argument(...),
+    role: str = typer.Argument(...),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Set user role (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.set_user_role(user_id, role)
+        typer.echo(f"Updated: {result}")
+        await client.close()
+    asyncio.run(_run())
 
 
 def main() -> None:

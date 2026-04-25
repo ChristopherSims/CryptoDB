@@ -2,12 +2,13 @@
 
 import base64
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cryptodb.api.dependencies import get_current_user, get_db
+from cryptodb.api.dependencies import get_current_user, get_db, security
 from cryptodb.auth.users import authenticate_user, create_user
 from cryptodb.auth.session import create_session
 from cryptodb.auth.rbac import require_permission
@@ -43,6 +44,8 @@ class PutPayload(BaseModel):
     compress: str = "zstd"
     searchable: dict[str, str] | None = None
     he_fields: dict[str, float] | None = None
+    content_type: str | None = None
+    tags: dict[str, str] | None = None
 
 
 class PutResponse(BaseModel):
@@ -160,6 +163,63 @@ class SealMasterKeyResponse(BaseModel):
     method: str
 
 
+class SearchPayload(BaseModel):
+    field_name: str
+    token_plaintext: str
+
+
+class SearchResponse(BaseModel):
+    record_ids: list[str]
+
+
+class ListRecordItem(BaseModel):
+    id: str
+    owner_id: str
+    created_at: str
+    size_bytes: int
+    cipher_name: str
+    content_type: str | None = None
+
+
+class GrantPayload(BaseModel):
+    user_id: str | None = None
+    role: str | None = None
+    permission: str  # read, write, delete
+
+
+class GrantResponse(BaseModel):
+    grant_id: str
+    permission: str
+    user_id: str | None = None
+    role: str | None = None
+
+
+class UserListItem(BaseModel):
+    id: str
+    username: str
+    email: str | None = None
+    role: str
+    is_active: bool
+    created_at: str
+
+
+class PatchRolePayload(BaseModel):
+    role: str
+
+
+class RefreshPayload(BaseModel):
+    refresh_token: str
+
+
+class HealthResponse(BaseModel):
+    status: str
+    engine_ready: bool
+    db_connected: bool
+    blob_store_writable: bool
+    disk_usage_percent: float
+    ledger_integrity_ok: bool
+
+
 @router.post("/init", status_code=status.HTTP_204_NO_CONTENT)
 async def init_database() -> None:
     await init_db()
@@ -188,6 +248,33 @@ async def login(
     return LoginResponse(access_token=access, refresh_token=refresh)
 
 
+@router.post("/auth/logout")
+async def logout(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    from cryptodb.auth.session import revoke_token
+    token = credentials.credentials
+    ok = await revoke_token(session, token)
+    await session.commit()
+    return {"status": "logged_out" if ok else "failed"}
+
+
+@router.post("/auth/refresh", response_model=LoginResponse)
+async def refresh(
+    payload: RefreshPayload,
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> LoginResponse:
+    from cryptodb.auth.session import rotate_refresh_token
+    result = await rotate_refresh_token(session, payload.refresh_token)
+    if result is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    access, refresh = result
+    await session.commit()
+    return LoginResponse(access_token=access, refresh_token=refresh)
+
+
 @router.post("/records", response_model=PutResponse)
 async def create_record(
     payload: PutPayload,
@@ -197,12 +284,20 @@ async def create_record(
     import base64
     engine = get_engine()
     plaintext = base64.b64decode(payload.data_b64)
+    max_size = settings.max_record_size_mb * 1024 * 1024
+    if len(plaintext) > max_size:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Record size {len(plaintext)} bytes exceeds max {max_size} bytes",
+        )
     record = await engine.put(
         session, user, plaintext,
         cipher_name=payload.cipher_name,
         compress_algo=payload.compress,
         searchable_fields=payload.searchable,
         he_fields=payload.he_fields,
+        content_type=getattr(payload, "content_type", None),
+        tags=getattr(payload, "tags", None),
     )
     await session.commit()
     return PutResponse(record_id=record.id, size_bytes=record.size_bytes)
@@ -232,6 +327,124 @@ async def delete_record(
     await engine.delete(session, user, record_id, secure=secure)
     await session.commit()
     return {"status": "deleted", "record_id": record_id}
+
+
+@router.post("/records/search", response_model=SearchResponse)
+async def search_records(
+    payload: SearchPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> SearchResponse:
+    engine = get_engine()
+    record_ids = await engine.search_by_index(session, user, payload.field_name, payload.token_plaintext)
+    return SearchResponse(record_ids=record_ids)
+
+
+@router.get("/records", response_model=list[ListRecordItem])
+async def list_records(
+    page: int = 1,
+    page_size: int = 20,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[ListRecordItem]:
+    engine = get_engine()
+    items = await engine.list_records(session, user, page=page, page_size=page_size)
+    return [
+        ListRecordItem(
+            id=r["id"],
+            owner_id=r["owner_id"],
+            created_at=r["created_at"],
+            size_bytes=r["size_bytes"],
+            cipher_name=r["cipher_name"],
+            content_type=r.get("content_type"),
+        )
+        for r in items
+    ]
+
+
+@router.post("/records/{record_id}/grants", response_model=GrantResponse)
+async def grant_record_access(
+    record_id: str,
+    payload: GrantPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> GrantResponse:
+    from cryptodb.auth.acl import grant_access
+    from cryptodb.db.metadata import Record
+    result = await session.execute(select(Record).where(Record.id == record_id))
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    if record.owner_id != user.id and not has_permission(user, "admin"):
+        raise HTTPException(status_code=403, detail="Only owner or admin can manage grants")
+    target_user = None
+    if payload.user_id:
+        from cryptodb.db.metadata import User as UserModel
+        ures = await session.execute(select(UserModel).where(UserModel.id == payload.user_id))
+        target_user = ures.scalar_one_or_none()
+        if target_user is None:
+            raise HTTPException(status_code=404, detail="Target user not found")
+    acl = await grant_access(
+        session, record, user, payload.permission,
+        user=target_user, role=payload.role,
+    )
+    await session.commit()
+    return GrantResponse(
+        grant_id=acl.id,
+        permission=acl.permission,
+        user_id=acl.user_id,
+        role=acl.role,
+    )
+
+
+@router.delete("/records/{record_id}/grants/{grant_id}")
+async def revoke_record_access(
+    record_id: str,
+    grant_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    from cryptodb.db.metadata import Record, RecordACL
+    result = await session.execute(select(Record).where(Record.id == record_id))
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    if record.owner_id != user.id and not has_permission(user, "admin"):
+        raise HTTPException(status_code=403, detail="Only owner or admin can manage grants")
+    res = await session.execute(select(RecordACL).where(RecordACL.id == grant_id, RecordACL.record_id == record_id))
+    acl = res.scalar_one_or_none()
+    if acl is None:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    await session.delete(acl)
+    await session.commit()
+    return {"status": "revoked", "grant_id": grant_id}
+
+
+@router.get("/records/{record_id}/grants")
+async def list_record_grants(
+    record_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[dict]:
+    from cryptodb.db.metadata import Record
+    result = await session.execute(select(Record).where(Record.id == record_id))
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    if record.owner_id != user.id and not has_permission(user, "admin"):
+        if not any(acl.user_id == user.id for acl in record.acl_entries):
+            raise HTTPException(status_code=403, detail="Access denied")
+    return [
+        {
+            "id": acl.id,
+            "user_id": acl.user_id,
+            "role": acl.role,
+            "permission": acl.permission,
+            "granted_at": acl.granted_at.isoformat() if acl.granted_at else None,
+            "granted_by": acl.granted_by,
+        }
+        for acl in record.acl_entries
+    ]
 
 
 @router.get("/audit")
@@ -275,9 +488,47 @@ async def unlock_master_key(
     return {"status": "unlocked", "key_id": settings.master_key_id}
 
 
-@router.get("/health")
-async def health_check() -> dict:
-    return {"status": "ok", "engine_ready": _engine is not None}
+@router.get("/health", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
+    import shutil
+    engine = get_engine()
+    db_ok = False
+    blob_ok = False
+    disk_usage = 0.0
+    try:
+        from cryptodb.db.connection import _ensure_engine
+        eng = _ensure_engine()
+        async with eng.connect() as conn:
+            await conn.execute(select(1))
+        db_ok = True
+    except Exception:
+        pass
+    try:
+        from cryptodb.storage.blob import BlobStore
+        bs = BlobStore()
+        blob_ok = await bs.health_check()
+    except Exception:
+        pass
+    try:
+        du = shutil.disk_usage(settings.resolved_data_dir)
+        disk_usage = round((du.used / du.total) * 100, 2) if du.total else 0.0
+    except Exception:
+        pass
+    ledger_ok = True
+    if engine is not None:
+        try:
+            failures = await engine.verify_ledger()
+            ledger_ok = len(failures) == 0
+        except Exception:
+            ledger_ok = False
+    return HealthResponse(
+        status="ok",
+        engine_ready=_engine is not None,
+        db_connected=db_ok,
+        blob_store_writable=blob_ok,
+        disk_usage_percent=disk_usage,
+        ledger_integrity_ok=ledger_ok,
+    )
 
 
 @router.post("/ledger/verify")
@@ -294,6 +545,81 @@ async def verify_ledger_endpoint(
             detail={"tampered": True, "failures": failures},
         )
     return {"tampered": False, "entries": engine._chain.length}
+
+
+# ---------------------------------------------------------------------------
+# User management (admin only)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/users", response_model=list[UserListItem])
+async def list_users(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[UserListItem]:
+    require_permission(user, "admin")
+    result = await session.execute(select(User).order_by(User.created_at))
+    rows = result.scalars().all()
+    return [
+        UserListItem(
+            id=u.id,
+            username=u.username,
+            email=u.email,
+            role=u.role,
+            is_active=u.is_active,
+            created_at=u.created_at.isoformat() if u.created_at else "",
+        )
+        for u in rows
+    ]
+
+
+@router.patch("/users/{user_id}/role")
+async def set_user_role(
+    user_id: str,
+    payload: PatchRolePayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "admin")
+    result = await session.execute(select(User).where(User.id == user_id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    target.role = payload.role
+    await session.commit()
+    return {"status": "updated", "user_id": user_id, "role": payload.role}
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "admin")
+    result = await session.execute(select(User).where(User.id == user_id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    target.is_active = False
+    await session.commit()
+    return {"status": "disabled", "user_id": user_id}
+
+
+@router.post("/users/{user_id}/disable")
+async def disable_user(
+    user_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "admin")
+    result = await session.execute(select(User).where(User.id == user_id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    target.is_active = False
+    await session.commit()
+    return {"status": "disabled", "user_id": user_id}
 
 
 @router.get("/compliance/gdpr/{user_id}")
@@ -341,6 +667,37 @@ async def soc2_report(
         "summary": report.summary,
         "findings": report.findings,
     }
+
+
+@router.get("/metrics")
+async def metrics_endpoint():
+    from cryptodb.api.metrics import get_metrics_response
+    data, content_type = get_metrics_response()
+    from fastapi import Response
+    return Response(content=data, media_type=content_type)
+
+
+@router.get("/audit/anomalies")
+async def audit_anomalies(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[dict]:
+    require_permission(user, "audit")
+    engine = get_engine()
+    entries = await engine.audit_log(session, user, run_anomaly_detection=True)
+    from cryptodb.ledger.anomaly import detect_bulk_access, detect_off_hours
+    anomalies = detect_off_hours(entries) + detect_bulk_access(entries)
+    return [
+        {
+            "rule": a.rule,
+            "description": a.description,
+            "severity": a.severity,
+            "actor_id": a.actor_id,
+            "timestamp": a.timestamp.isoformat(),
+            "details": a.details,
+        }
+        for a in anomalies
+    ]
 
 
 @router.post("/he/init")

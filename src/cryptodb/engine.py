@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cryptodb.auth.acl import can_access
@@ -15,7 +15,7 @@ from cryptodb.crypto.envelope import Envelope, EnvelopeCipher
 from cryptodb.crypto.he import HEEncryptedNumber, HEKeyPair, PaillierHE
 from cryptodb.crypto.integrity import IntegrityToken, compute_hmac, verify_hmac
 from cryptodb.crypto.keystore import MasterKeyStore
-from cryptodb.crypto.searchable import SearchableCipher, SearchableIndex
+from cryptodb.crypto.searchable import SearchableCipher
 from cryptodb.db.metadata import AuditLog, Record, User
 from cryptodb.ledger.chain import HashChain
 from cryptodb.replication.engine import ReplicationEngine
@@ -113,10 +113,26 @@ class CryptoDBEngine:
         compress_algo: str = "zstd",
         searchable_fields: dict[str, str] | None = None,
         he_fields: dict[str, int | float] | None = None,
+        content_type: str | None = None,
+        tags: dict[str, str] | None = None,
     ) -> Record:
         """Encrypt and store a record; return the DB row."""
         if not has_permission(user, "create"):
             raise PermissionError("User cannot create records")
+
+        # Quota check
+        if user.quota_bytes is not None and not has_permission(user, "admin"):
+            result = await session.execute(
+                select(func.coalesce(func.sum(Record.size_bytes), 0)).where(
+                    Record.owner_id == user.id,
+                    Record.is_deleted == False,  # noqa: E712
+                )
+            )
+            used = result.scalar_one()
+            if used + len(plaintext) > user.quota_bytes:
+                raise PermissionError(
+                    f"Storage quota exceeded: {used + len(plaintext)} > {user.quota_bytes}"
+                )
 
         # Compress then encrypt
         compressed = compress(plaintext, algorithm=compress_algo)
@@ -145,11 +161,14 @@ class CryptoDBEngine:
             owner_id=user.id,
             blob_path="",  # placeholder
             cipher_name=envelope.cipher_name,
+            master_key_id=settings.master_key_id,
             encrypted_dek=envelope.encrypted_dek.to_dict(),
             integrity_token=integ.to_dict(),
             searchable_indices=indices if indices else None,
             he_fields=he_data,
             size_bytes=len(plaintext),
+            content_type=content_type,
+            tags=tags,
         )
         session.add(record)
         await session.flush()  # get record.id
@@ -240,6 +259,7 @@ class CryptoDBEngine:
                 raise PermissionError("Access denied")
 
         record.is_deleted = True
+        record.deleted_at = datetime.now(timezone.utc)
         await session.flush()
 
         if secure:
@@ -260,7 +280,65 @@ class CryptoDBEngine:
 
         logger.info("Record deleted", extra={"event": "record_deleted", "actor": user.username, "record_id": record_id})
 
-    async def audit_log(self, session: AsyncSession, user: User) -> list[dict]:
+    async def search_by_index(
+        self,
+        session: AsyncSession,
+        user: User,
+        field_name: str,
+        token_plaintext: str,
+    ) -> list[str]:
+        """Search records by blind index without decrypting."""
+        if not has_permission(user, "read"):
+            raise PermissionError("Access denied")
+        sc = SearchableCipher(self._search_key)
+        target_idx = sc.index(token_plaintext, field_name=field_name)
+        target_b64 = base64.b64encode(target_idx.token).decode()
+
+        result = await session.execute(
+            select(Record).where(Record.is_deleted == False)  # noqa: E712
+        )
+        records = result.scalars().all()
+        matches: list[str] = []
+        for record in records:
+            if not (record.owner_id == user.id or await can_access(session, user, record, "read")):
+                if not has_permission(user, "admin"):
+                    continue
+            indices = record.searchable_indices or {}
+            field_idx = indices.get(field_name)
+            if field_idx and field_idx.get("token") == target_b64:
+                matches.append(record.id)
+        return matches
+
+    async def list_records(
+        self,
+        session: AsyncSession,
+        user: User,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> list[dict]:
+        """List accessible records with pagination."""
+        if not has_permission(user, "read"):
+            raise PermissionError("Access denied")
+        stmt = select(Record).where(Record.is_deleted == False).order_by(Record.created_at.desc())  # noqa: E712
+        result = await session.execute(stmt)
+        all_records = result.scalars().all()
+        items: list[dict] = []
+        for record in all_records:
+            if not (record.owner_id == user.id or await can_access(session, user, record, "read")):
+                if not has_permission(user, "admin"):
+                    continue
+            items.append({
+                "id": record.id,
+                "owner_id": record.owner_id,
+                "created_at": record.created_at.isoformat() if record.created_at else "",
+                "size_bytes": record.size_bytes,
+                "cipher_name": record.cipher_name,
+                "content_type": record.content_type,
+            })
+        start = (page - 1) * page_size
+        return items[start:start + page_size]
+
+    async def audit_log(self, session: AsyncSession, user: User, run_anomaly_detection: bool = False) -> list[dict]:
         """Return audit entries for admins/auditors."""
         if not has_permission(user, "audit"):
             raise PermissionError("Access denied")
@@ -269,7 +347,7 @@ class CryptoDBEngine:
             select(AuditLog).order_by(AuditLog.entry_number)
         )
         rows = result.scalars().all()
-        return [
+        entries = [
             {
                 "entry_number": r.entry_number,
                 "timestamp": r.timestamp.isoformat(),
@@ -285,6 +363,20 @@ class CryptoDBEngine:
             }
             for r in rows
         ]
+        if run_anomaly_detection:
+            from cryptodb.ledger.anomaly import detect_bulk_access, detect_off_hours
+            anomalies = detect_off_hours(entries) + detect_bulk_access(entries)
+            for a in anomalies:
+                logger.warning(
+                    "Audit anomaly detected",
+                    extra={
+                        "rule": a.rule,
+                        "severity": a.severity,
+                        "actor_id": a.actor_id,
+                        "description": a.description,
+                    },
+                )
+        return entries
 
     async def verify_ledger(self) -> list[tuple[int, str]]:
         """Verify the in-memory hash chain."""

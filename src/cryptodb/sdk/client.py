@@ -154,6 +154,152 @@ class CryptoDBClient:
         return r.json()
 
     # ------------------------------------------------------------------
+    # Batch operations (client-side concurrency)
+    # ------------------------------------------------------------------
+
+    async def put_batch(
+        self,
+        items: list[bytes],
+        cipher_name: str | None = None,
+        compress: str = "zstd",
+        searchable: dict[str, str] | None = None,
+        he_fields: dict[str, float] | None = None,
+    ) -> list[dict]:
+        import asyncio
+        sem = asyncio.Semaphore(10)
+        async def _put_one(data: bytes) -> dict:
+            async with sem:
+                return await self.put(data, cipher_name=cipher_name, compress=compress, searchable=searchable, he_fields=he_fields)
+        return await asyncio.gather(*[_put_one(d) for d in items])
+
+    async def get_batch(self, record_ids: list[str]) -> list[bytes]:
+        import asyncio
+        sem = asyncio.Semaphore(10)
+        async def _get_one(rid: str) -> bytes:
+            async with sem:
+                return await self.get(rid)
+        return await asyncio.gather(*[_get_one(rid) for rid in record_ids])
+
+    async def delete_batch(self, record_ids: list[str], secure: bool = False) -> list[dict]:
+        import asyncio
+        sem = asyncio.Semaphore(10)
+        async def _delete_one(rid: str) -> dict:
+            async with sem:
+                return await self.delete(rid, secure=secure)
+        return await asyncio.gather(*[_delete_one(rid) for rid in record_ids])
+
+    # ------------------------------------------------------------------
+    # Search & list
+    # ------------------------------------------------------------------
+
+    async def search(self, field_name: str, token_plaintext: str) -> list[str]:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/records/search",
+            json={"field_name": field_name, "token_plaintext": token_plaintext},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json().get("record_ids", [])
+
+    async def list_records(self, page: int = 1, page_size: int = 20) -> list[dict]:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.get(
+            f"{self._base}/records",
+            params={"page": page, "page_size": page_size},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ------------------------------------------------------------------
+    # Auth helpers
+    # ------------------------------------------------------------------
+
+    async def logout(self) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/auth/logout",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        self._token = None
+        return r.json()
+
+    async def refresh(self, refresh_token: str) -> TokenPair:
+        r = await self._client.post(
+            f"{self._base}/auth/refresh",
+            json={"refresh_token": refresh_token},
+        )
+        r.raise_for_status()
+        data = r.json()
+        self._token = data["access_token"]
+        return TokenPair(access_token=data["access_token"], refresh_token=data["refresh_token"])
+
+    # ------------------------------------------------------------------
+    # ACL management
+    # ------------------------------------------------------------------
+
+    async def grant_access(self, record_id: str, permission: str, user_id: str | None = None, role: str | None = None) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/records/{record_id}/grants",
+            json={"permission": permission, "user_id": user_id, "role": role},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def revoke_access(self, record_id: str, grant_id: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.delete(
+            f"{self._base}/records/{record_id}/grants/{grant_id}",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def list_grants(self, record_id: str) -> list[dict]:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.get(
+            f"{self._base}/records/{record_id}/grants",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ------------------------------------------------------------------
+    # User management
+    # ------------------------------------------------------------------
+
+    async def list_users(self) -> list[dict]:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.get(
+            f"{self._base}/users",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def set_user_role(self, user_id: str, role: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.patch(
+            f"{self._base}/users/{user_id}/role",
+            json={"role": role},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ------------------------------------------------------------------
     # Replication
     # ------------------------------------------------------------------
 

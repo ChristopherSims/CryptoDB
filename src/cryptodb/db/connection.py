@@ -18,6 +18,8 @@ def _ensure_engine():
             f"sqlite+aiosqlite:///{settings.db_path}",
             echo=False,
             future=True,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
         )
     return _engine
 

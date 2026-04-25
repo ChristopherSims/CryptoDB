@@ -21,6 +21,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), default="reader", nullable=False)
     is_active: Mapped[bool] = mapped_column(default=True)
     hardware_mfa_required: Mapped[bool] = mapped_column(default=False)
+    quota_bytes: Mapped[int | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -47,6 +48,15 @@ class Session(Base):
     user: Mapped["User"] = relationship(back_populates="sessions")
 
 
+class TokenBlacklist(Base):
+    __tablename__ = "token_blacklist"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    jti: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class Record(Base):
     __tablename__ = "records"
 
@@ -54,14 +64,18 @@ class Record(Base):
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     blob_path: Mapped[str] = mapped_column(Text, nullable=False)
     cipher_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    master_key_id: Mapped[str | None] = mapped_column(String(64), default=None)
     encrypted_dek: Mapped[dict] = mapped_column(JSON, nullable=False)
     integrity_token: Mapped[dict] = mapped_column(JSON, nullable=False)
     searchable_indices: Mapped[dict | None] = mapped_column(JSON)
     he_fields: Mapped[dict | None] = mapped_column(JSON)
     size_bytes: Mapped[int] = mapped_column(default=0)
+    content_type: Mapped[str | None] = mapped_column(String(128), default=None)
+    tags: Mapped[dict | None] = mapped_column(JSON)
     version: Mapped[int] = mapped_column(default=1)
     previous_version_id: Mapped[str | None] = mapped_column(ForeignKey("records.id"), nullable=True)
     is_deleted: Mapped[bool] = mapped_column(default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -76,6 +90,8 @@ class Record(Base):
     __table_args__ = (
         Index("idx_records_owner", "owner_id"),
         Index("idx_records_deleted", "is_deleted"),
+        Index("idx_records_deleted_at", "deleted_at"),
+        Index("idx_records_content_type", "content_type"),
     )
 
 
@@ -109,6 +125,7 @@ class AuditLog(Base):
     session_id: Mapped[str | None] = mapped_column(String(36))
     previous_hash: Mapped[str] = mapped_column(Text, nullable=False)
     entry_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[str | None] = mapped_column(String(64))
 
     user: Mapped["User | None"] = relationship(foreign_keys=[actor_id])
 
@@ -117,6 +134,21 @@ class AuditLog(Base):
         Index("idx_audit_action", "action"),
         Index("idx_audit_resource", "resource_type", "resource_id"),
         Index("idx_audit_timestamp", "timestamp"),
+        Index("idx_audit_request_id", "request_id"),
+    )
+
+
+class LedgerCheckpoint(Base):
+    __tablename__ = "ledger_checkpoints"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    checkpoint_number: Mapped[int] = mapped_column(nullable=False, unique=True)
+    last_entry_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    signature: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("idx_checkpoint_number", "checkpoint_number"),
     )
 
 
@@ -194,4 +226,24 @@ class ReplicationLog(Base):
         Index("idx_replog_node", "node_id"),
         Index("idx_replog_status", "status"),
         Index("idx_replog_seq", "sequence_number"),
+    )
+
+
+class ReplicationDeadLetter(Base):
+    __tablename__ = "replication_dead_letter"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    record_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    node_id: Mapped[str] = mapped_column(ForeignKey("replication_nodes.id"), nullable=False)
+    metadata_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    blob_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    sequence_number: Mapped[int] = mapped_column(nullable=False)
+    error_history: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    node: Mapped["ReplicationNode"] = relationship()
+
+    __table_args__ = (
+        Index("idx_dl_node", "node_id"),
+        Index("idx_dl_record", "record_id"),
     )

@@ -45,3 +45,16 @@ class BlobStore:
 
     def exists(self, path: str) -> bool:
         return Path(path).exists()
+
+    async def health_check(self) -> bool:
+        """Verify blob store is writable."""
+        try:
+            test_path = self._base_dir / ".healthcheck"
+            async with aiofiles.open(test_path, "wb") as f:
+                await f.write(b"ok")
+            async with aiofiles.open(test_path, "rb") as f:
+                data = await f.read()
+            os.remove(test_path)
+            return data == b"ok"
+        except Exception:
+            return False
