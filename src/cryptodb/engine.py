@@ -18,6 +18,7 @@ from cryptodb.crypto.keystore import MasterKeyStore
 from cryptodb.crypto.searchable import SearchableCipher, SearchableIndex
 from cryptodb.db.metadata import AuditLog, Record, User
 from cryptodb.ledger.chain import HashChain
+from cryptodb.replication.engine import ReplicationEngine
 from cryptodb.storage.blob import BlobStore
 from cryptodb.storage.compression import compress, decompress
 
@@ -61,6 +62,7 @@ class CryptoDBEngine:
         master_key: bytes,
         blob_store: BlobStore | None = None,
         hash_chain: HashChain | None = None,
+        replication_engine: ReplicationEngine | None = None,
     ) -> None:
         self._env = EnvelopeCipher(master_key)
         self._blob = blob_store or BlobStore()
@@ -69,6 +71,7 @@ class CryptoDBEngine:
         self._integ_key = master_key  # In production, derive a separate key
         self._master_key = master_key
         self._he: PaillierHE | None = None
+        self._repl = replication_engine
 
     def _get_he(self) -> PaillierHE:
         """Return cached PaillierHE instance."""
@@ -165,6 +168,10 @@ class CryptoDBEngine:
         )
         await self._persist_audit(session)
 
+        # Replication
+        if settings.replication_enabled and self._repl is not None:
+            await self._repl.sync_record(session, record)
+
         logger.info("Record created", extra={"event": "record_created", "actor": user.username, "record_id": record.id})
         return record
 
@@ -244,6 +251,10 @@ class CryptoDBEngine:
             details={"secure": secure},
         )
         await self._persist_audit(session)
+
+        # Replication: sync deletion metadata so standbys know it's deleted
+        if settings.replication_enabled and self._repl is not None:
+            await self._repl.sync_record(session, record)
 
         logger.info("Record deleted", extra={"event": "record_deleted", "actor": user.username, "record_id": record_id})
 
@@ -331,6 +342,7 @@ class CryptoDBEngine:
         result = await session.execute(select(AuditLog.entry_number).order_by(AuditLog.entry_number.desc()))
         max_num = result.scalar_one_or_none() or 0
         new_entries = [e for e in entries if e.entry_number > max_num]
+        audit_rows: list[AuditLog] = []
         for e in new_entries:
             log = AuditLog(
                 entry_number=e.entry_number,
@@ -347,4 +359,10 @@ class CryptoDBEngine:
                 entry_hash=e.entry_hash,
             )
             session.add(log)
+            audit_rows.append(log)
         await session.flush()
+
+        # Replicate audit entries
+        if settings.replication_enabled and self._repl is not None and audit_rows:
+            for row in audit_rows:
+                await self._repl.sync_audit_entry(session, row)

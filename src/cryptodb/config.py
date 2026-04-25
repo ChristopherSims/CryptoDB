@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000)
     api_workers: int = Field(default=1)
 
+    # Replication
+    replication_enabled: bool = Field(default=False, description="Enable push replication to standby nodes")
+    replication_batch_size: int = Field(default=100, description="Max records per replication batch")
+    replication_retry_max: int = Field(default=3, description="Max retry attempts per standby node")
+    replication_interval_seconds: int = Field(default=60, description="Background replication interval")
+
     @property
     def resolved_data_dir(self) -> Path:
         """Return absolute data directory, creating if needed."""

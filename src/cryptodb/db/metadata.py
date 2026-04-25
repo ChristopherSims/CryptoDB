@@ -132,6 +132,48 @@ class KeyRotationLog(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")  # pending, complete, failed
 
 
+class ReplicationNode(Base):
+    __tablename__ = "replication_nodes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    endpoint_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    auth_token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active, unhealthy, disabled
+    last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    is_primary: Mapped[bool] = mapped_column(default=False)
+
+    __table_args__ = (
+        Index("idx_rep_nodes_status", "status"),
+    )
+
+
+class ReplicationLog(Base):
+    __tablename__ = "replication_log"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    record_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    node_id: Mapped[str] = mapped_column(ForeignKey("replication_nodes.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending, sent, failed, acked
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retry_count: Mapped[int] = mapped_column(default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    blob_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    metadata_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    sequence_number: Mapped[int] = mapped_column(nullable=False)
+
+    node: Mapped["ReplicationNode"] = relationship()
+
+    __table_args__ = (
+        Index("idx_replog_node", "node_id"),
+        Index("idx_replog_status", "status"),
+        Index("idx_replog_seq", "sequence_number"),
+    )
+
+
 async def init_db() -> None:
     """Create all metadata tables."""
     from cryptodb.db.connection import _engine

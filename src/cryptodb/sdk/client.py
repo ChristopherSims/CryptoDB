@@ -152,3 +152,59 @@ class CryptoDBClient:
         )
         r.raise_for_status()
         return r.json()
+
+    # ------------------------------------------------------------------
+    # Replication
+    # ------------------------------------------------------------------
+
+    async def register_standby(self, name: str, endpoint_url: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/replication/nodes",
+            json={"name": name, "endpoint_url": endpoint_url},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def list_standbys(self) -> list[dict]:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.get(
+            f"{self._base}/replication/nodes",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def unregister_standby(self, node_id: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.delete(
+            f"{self._base}/replication/nodes/{node_id}",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def replication_health_check(self) -> list[dict]:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/replication/health-check",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def replication_retry(self) -> list[dict]:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/replication/retry",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+

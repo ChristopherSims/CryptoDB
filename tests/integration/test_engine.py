@@ -100,3 +100,22 @@ class TestPutGetDelete:
         enc_sum = await engine.he_sum(session, user, [r1.id, r2.id, r3.id], "amount")
         decrypted = await engine.he_decrypt_aggregate(session, user, enc_sum)
         assert abs(decrypted - 600.0) < 0.1
+
+    async def test_replication_disabled_by_default(self, session: AsyncSession, user, engine: CryptoDBEngine) -> None:
+        # By default replication_enabled is False, so _repl should be None
+        assert engine._repl is None
+
+    async def test_replication_enabled_no_nodes(self, session: AsyncSession, user) -> None:
+        from cryptodb.crypto.keystore import MasterKeyStore
+        from cryptodb.replication.engine import ReplicationEngine
+        kek = MasterKeyStore().create_master_key("test")
+        repl = ReplicationEngine()
+        engine = CryptoDBEngine(kek, replication_engine=repl)
+        settings.replication_enabled = True
+        try:
+            record = await engine.put(session, user, b"replicated data")
+            await session.commit()
+            # No nodes registered, so replication should silently do nothing
+            assert record is not None
+        finally:
+            settings.replication_enabled = False

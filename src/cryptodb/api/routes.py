@@ -20,9 +20,12 @@ from cryptodb.db.metadata import User
 from cryptodb.engine import CryptoDBEngine
 from cryptodb.ledger.verify import TamperError, verify_ledger
 
+from cryptodb.replication.engine import ReplicationEngine
+
 router = APIRouter()
 
 _engine: CryptoDBEngine | None = None
+_repl_engine: ReplicationEngine | None = None
 
 
 def get_engine() -> CryptoDBEngine:
@@ -64,6 +67,45 @@ class HEDecryptPayload(BaseModel):
 
 class HEDecryptResponse(BaseModel):
     decrypted_value: float
+
+
+class RegisterNodePayload(BaseModel):
+    name: str
+    endpoint_url: str
+
+
+class RegisterNodeResponse(BaseModel):
+    node_id: str
+    auth_token: str
+    endpoint_url: str
+
+
+class ReplicationPushPayload(BaseModel):
+    record_id: str
+    ciphertext_b64: str
+    metadata: dict
+    sequence_number: int
+    checksum: str
+
+
+class ReplicationPushResponse(BaseModel):
+    status: str
+    checksum_ok: bool
+
+
+class ReplicationAuditPayload(BaseModel):
+    entry_number: int
+    timestamp: str
+    actor_id: str | None
+    action: str
+    resource_type: str
+    resource_id: str | None
+    result: str
+    details: dict | None
+    client_ip: str | None
+    session_id: str | None
+    previous_hash: str
+    entry_hash: str
 
 
 class LoginPayload(BaseModel):
@@ -170,8 +212,9 @@ async def setup_master_key(
     ks = MasterKeyStore()
     kek = ks.create_master_key(passphrase)
     chain = await CryptoDBEngine.load_chain(session)
-    global _engine
-    _engine = CryptoDBEngine(kek, hash_chain=chain)
+    global _engine, _repl_engine
+    _repl_engine = ReplicationEngine() if settings.replication_enabled else None
+    _engine = CryptoDBEngine(kek, hash_chain=chain, replication_engine=_repl_engine)
     return {"status": "created", "key_id": settings.master_key_id}
 
 
@@ -185,8 +228,9 @@ async def unlock_master_key(
     ks = MasterKeyStore()
     kek = ks.load_master_key(passphrase)
     chain = await CryptoDBEngine.load_chain(session)
-    global _engine
-    _engine = CryptoDBEngine(kek, hash_chain=chain)
+    global _engine, _repl_engine
+    _repl_engine = ReplicationEngine() if settings.replication_enabled else None
+    _engine = CryptoDBEngine(kek, hash_chain=chain, replication_engine=_repl_engine)
     return {"status": "unlocked", "key_id": settings.master_key_id}
 
 
@@ -294,3 +338,136 @@ async def he_decrypt_endpoint(
     enc = HEEncryptedNumber.from_dict(payload.encrypted_sum)
     value = await engine.he_decrypt_aggregate(session, user, enc)
     return HEDecryptResponse(decrypted_value=float(value))
+
+
+# ---------------------------------------------------------------------------
+# Replication endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/replication/nodes", response_model=RegisterNodeResponse)
+async def register_standby_node(
+    payload: RegisterNodePayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> RegisterNodeResponse:
+    require_permission(user, "admin")
+    repl = ReplicationEngine()
+    node, token = await repl.register_node(session, user, payload.name, payload.endpoint_url)
+    await session.commit()
+    return RegisterNodeResponse(node_id=node.id, auth_token=token, endpoint_url=node.endpoint_url)
+
+
+@router.delete("/replication/nodes/{node_id}")
+async def unregister_standby_node(
+    node_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "admin")
+    repl = ReplicationEngine()
+    await repl.unregister_node(session, user, node_id)
+    await session.commit()
+    return {"status": "unregistered", "node_id": node_id}
+
+
+@router.get("/replication/nodes")
+async def list_standby_nodes(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[dict]:
+    require_permission(user, "admin")
+    repl = ReplicationEngine()
+    nodes = await repl.list_nodes(session, user)
+    return [
+        {
+            "id": n.id,
+            "name": n.name,
+            "endpoint_url": n.endpoint_url,
+            "status": n.status,
+            "last_heartbeat": n.last_heartbeat.isoformat() if n.last_heartbeat else None,
+            "created_at": n.created_at.isoformat(),
+            "is_primary": n.is_primary,
+        }
+        for n in nodes
+    ]
+
+
+@router.post("/replication/health-check")
+async def replication_health_check(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[dict]:
+    require_permission(user, "admin")
+    repl = ReplicationEngine()
+    outcomes = await repl.health_check_nodes(session)
+    await session.commit()
+    return [
+        {"node_id": nid, "healthy": ok, "error": err}
+        for nid, ok, err in outcomes
+    ]
+
+
+@router.post("/replication/retry")
+async def replication_retry(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[dict]:
+    require_permission(user, "admin")
+    repl = ReplicationEngine()
+    logs = await repl.retry_pending(session, max_retries=settings.replication_retry_max)
+    await session.commit()
+    return [
+        {
+            "log_id": log.id,
+            "record_id": log.record_id,
+            "node_id": log.node_id,
+            "status": log.status,
+            "retry_count": log.retry_count,
+            "error": log.error_message,
+        }
+        for log in logs
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Standby-side endpoints (called by primary)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/replication/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
+async def replication_heartbeat() -> None:
+    """Simple health endpoint for primary to ping."""
+    return None
+
+
+@router.post("/replication/push", response_model=ReplicationPushResponse)
+async def replication_receive_push(
+    payload: ReplicationPushPayload,
+) -> ReplicationPushResponse:
+    """Receive a replicated record from the primary node."""
+    import base64
+    import hashlib
+
+    ciphertext = base64.b64decode(payload.ciphertext_b64)
+    checksum_ok = hashlib.sha3_256(ciphertext).hexdigest() == payload.checksum
+    if not checksum_ok:
+        return ReplicationPushResponse(status="checksum_mismatch", checksum_ok=False)
+
+    # Persist to local standby storage
+    from cryptodb.storage.blob import BlobStore
+    blob_store = BlobStore()
+    await blob_store.write(payload.record_id, ciphertext)
+
+    # TODO: persist metadata snapshot to local metadata DB if desired
+    return ReplicationPushResponse(status="acked", checksum_ok=True)
+
+
+@router.post("/replication/audit")
+async def replication_receive_audit(
+    payload: ReplicationAuditPayload,
+) -> dict:
+    """Receive an audit log entry from the primary node."""
+    # TODO: persist to local audit ledger if desired
+    return {"status": "acked", "entry_number": payload.entry_number}
+
