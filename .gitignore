@@ -36,5 +36,5 @@ htmlcov/
 data/
 keys/
 secrets/
-.hermes/
+.hermes/*
 .hermes

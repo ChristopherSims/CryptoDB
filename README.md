@@ -25,6 +25,12 @@ A cryptographic database with immutable audit ledger. All data is encrypted at r
 pip install -e ".[dev]"
 ```
 
+Build Package
+```bash
+pip -m build
+```
+
+
 ### Initialize
 
 ```bash
