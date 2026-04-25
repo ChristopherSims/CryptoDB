@@ -7,11 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cryptodb.api.dependencies import get_current_user, get_db
 from cryptodb.auth.users import authenticate_user, create_user
 from cryptodb.auth.session import create_session
+from cryptodb.auth.rbac import require_permission
 from cryptodb.config import settings
 from cryptodb.crypto.keystore import MasterKeyStore
+from cryptodb.compliance.reports import (
+    gdpr_right_to_erasure_report,
+    hipaa_access_report,
+    soc2_evidence_export,
+)
 from cryptodb.db.connection import init_db
 from cryptodb.db.metadata import User
 from cryptodb.engine import CryptoDBEngine
+from cryptodb.ledger.verify import TamperError, verify_ledger
 
 router = APIRouter()
 
@@ -137,8 +144,10 @@ async def list_audit(
 @router.post("/master-key")
 async def setup_master_key(
     passphrase: str,
+    user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict:
+    require_permission(user, "admin")
     ks = MasterKeyStore()
     kek = ks.create_master_key(passphrase)
     chain = await CryptoDBEngine.load_chain(session)
@@ -150,11 +159,81 @@ async def setup_master_key(
 @router.post("/master-key/unlock")
 async def unlock_master_key(
     passphrase: str,
+    user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict:
+    require_permission(user, "admin")
     ks = MasterKeyStore()
     kek = ks.load_master_key(passphrase)
     chain = await CryptoDBEngine.load_chain(session)
     global _engine
     _engine = CryptoDBEngine(kek, hash_chain=chain)
     return {"status": "unlocked", "key_id": settings.master_key_id}
+
+
+@router.get("/health")
+async def health_check() -> dict:
+    return {"status": "ok", "engine_ready": _engine is not None}
+
+
+@router.post("/ledger/verify")
+async def verify_ledger_endpoint(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "audit")
+    engine = get_engine()
+    failures = await engine.verify_ledger()
+    if failures:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"tampered": True, "failures": failures},
+        )
+    return {"tampered": False, "entries": engine._chain.length}
+
+
+@router.get("/compliance/gdpr/{user_id}")
+async def gdpr_report(
+    user_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "audit")
+    report = await gdpr_right_to_erasure_report(session, user_id)
+    return {
+        "standard": report.standard,
+        "generated_at": report.generated_at.isoformat(),
+        "summary": report.summary,
+        "findings": report.findings,
+    }
+
+
+@router.get("/compliance/hipaa/{record_id}")
+async def hipaa_report(
+    record_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "audit")
+    report = await hipaa_access_report(session, record_id)
+    return {
+        "standard": report.standard,
+        "generated_at": report.generated_at.isoformat(),
+        "summary": report.summary,
+        "findings": report.findings,
+    }
+
+
+@router.get("/compliance/soc2")
+async def soc2_report(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    require_permission(user, "audit")
+    report = await soc2_evidence_export(session)
+    return {
+        "standard": report.standard,
+        "generated_at": report.generated_at.isoformat(),
+        "summary": report.summary,
+        "findings": report.findings,
+    }
