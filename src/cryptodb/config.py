@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     api_host: str = Field(default="127.0.0.1")
     api_port: int = Field(default=8000)
     api_workers: int = Field(default=1)
+    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
 
     # DB pool
     db_pool_size: int = Field(default=5)

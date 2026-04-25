@@ -105,11 +105,21 @@ def audit(
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", "-h"),
     port: int = typer.Option(8000, "--port", "-p"),
+    workers: int = typer.Option(1, "--workers", "-w"),
 ) -> None:
     """Run the CryptoDB API server."""
     import uvicorn
+    import signal
+    import sys
 
-    uvicorn.run("cryptodb.api.main:app", host=host, port=port, reload=False)
+    def _handle_signal(signum, frame):  # noqa: ARG001
+        typer.echo(f"Received signal {signum}, shutting down gracefully...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    uvicorn.run("cryptodb.api.main:app", host=host, port=port, reload=False, workers=workers)
 
 
 @app.command()
@@ -265,8 +275,8 @@ def purge_deleted(
     async def _run() -> None:
         client = CryptoDBClient(base_url)
         await client.login(username, password)
-        # Placeholder: API endpoint for purge not yet implemented
-        typer.echo("Purge endpoint not yet implemented via API. Use direct DB access.")
+        result = await client.purge_deleted()
+        typer.echo(f"Purged {result.get('purged', 0)} records")
         await client.close()
     asyncio.run(_run())
 
@@ -302,6 +312,28 @@ def user_set_role(
         await client.login(username, password)
         result = await client.set_user_role(user_id, role)
         typer.echo(f"Updated: {result}")
+        await client.close()
+    asyncio.run(_run())
+
+
+
+@app.command()
+def ledger_export(
+    output: Path = typer.Argument(..., help="Output file path (json or csv)"),
+    fmt: str = typer.Option("json", "--format", help="Export format: json or csv"),
+    start_date: str | None = typer.Option(None, "--start-date"),
+    end_date: str | None = typer.Option(None, "--end-date"),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Export ledger entries to a file."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        data = await client.ledger_export(fmt=fmt, start_date=start_date, end_date=end_date)
+        output.write_text(__import__("json").dumps(data, indent=2, default=str))
+        typer.echo(f"Exported ledger to {output}")
         await client.close()
     asyncio.run(_run())
 

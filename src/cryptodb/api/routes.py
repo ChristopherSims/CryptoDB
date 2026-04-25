@@ -531,6 +531,19 @@ async def health_check() -> HealthResponse:
     )
 
 
+@router.post("/admin/purge-deleted")
+async def purge_deleted(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Permanently purge soft-deleted records past retention period."""
+    require_permission(user, "admin")
+    engine = get_engine()
+    count = await engine.purge_soft_deleted(session, user)
+    await session.commit()
+    return {"purged": count}
+
+
 @router.post("/ledger/verify")
 async def verify_ledger_endpoint(
     user: User = Depends(get_current_user),  # noqa: B008
@@ -545,6 +558,39 @@ async def verify_ledger_endpoint(
             detail={"tampered": True, "failures": failures},
         )
     return {"tampered": False, "entries": engine._chain.length}
+
+
+@router.get("/ledger/export")
+async def ledger_export(
+    fmt: str = "json",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Export ledger entries within a date range."""
+    require_permission(user, "audit")
+    engine = get_engine()
+    entries = await engine.audit_log(session, user)
+    filtered = entries
+    if start_date or end_date:
+        from datetime import datetime
+        if start_date:
+            start = datetime.fromisoformat(start_date)
+            filtered = [e for e in filtered if e.get("timestamp") and datetime.fromisoformat(e["timestamp"]) >= start]
+        if end_date:
+            end = datetime.fromisoformat(end_date)
+            filtered = [e for e in filtered if e.get("timestamp") and datetime.fromisoformat(e["timestamp"]) <= end]
+    if fmt == "csv":
+        import csv
+        import io
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=["entry_number", "timestamp", "actor_id", "action", "resource_type", "resource_id", "result", "entry_hash"])
+        writer.writeheader()
+        for e in filtered:
+            writer.writerow({k: e.get(k, "") for k in writer.fieldnames})
+        return {"format": "csv", "data": buf.getvalue()}
+    return {"format": "json", "data": filtered}
 
 
 # ---------------------------------------------------------------------------

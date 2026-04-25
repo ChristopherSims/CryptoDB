@@ -421,4 +421,25 @@ class CryptoDBClient:
         r.raise_for_status()
         return r.json()
 
+    async def purge_deleted(self) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/admin/purge-deleted",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def ledger_export(self, fmt: str = "json", start_date: str | None = None, end_date: str | None = None) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.get(
+            f"{self._base}/ledger/export",
+            params={"format": fmt, "start_date": start_date, "end_date": end_date},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
 

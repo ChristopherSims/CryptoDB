@@ -1,37 +1,43 @@
-"""Structured JSON logging configuration."""
+"""Structured JSON logging configuration using structlog."""
 
-import json
 import logging
 import sys
-from datetime import datetime, timezone
-from typing import Any
 
-
-class JSONFormatter(logging.Formatter):
-    """Emit log records as single-line JSON."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        log_obj: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        if hasattr(record, "event"):
-            log_obj["event"] = record.event
-        if hasattr(record, "actor"):
-            log_obj["actor"] = record.actor
-        if hasattr(record, "record_id"):
-            log_obj["record_id"] = record.record_id
-        if record.exc_info:
-            log_obj["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_obj, default=str)
+import structlog
 
 
 def setup_logging(level: int = logging.INFO) -> None:
-    """Configure root logger for structured JSON output."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JSONFormatter())
-    root = logging.getLogger()
-    root.setLevel(level)
-    root.handlers = [handler]
+    """Configure structured JSON logging for the application."""
+    shared_processors: list[structlog.types.Processor] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.ExtraAdder(),
+    ]
+
+    if sys.stderr.isatty():
+        # Pretty print when running in a terminal
+        processors = shared_processors + [
+            structlog.dev.ConsoleRenderer(colors=True),
+        ]
+    else:
+        # JSON for production
+        processors = shared_processors + [
+            structlog.processors.dict_tracebacks,
+            structlog.processors.JSONRenderer(),
+        ]
+
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    # Also configure stdlib logging to route through structlog
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=level,
+    )
