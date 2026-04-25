@@ -25,6 +25,7 @@ def temp_dirs():
         settings.blob_dir = Path(os.path.join(tmpdir, "data", "blobs"))
         settings.db_path = Path(os.path.join(tmpdir, "data", "cryptodb.db"))
         settings.keys_dir = Path(os.path.join(tmpdir, "data", "keys"))
+        settings.replication_allow_http = True
         os.makedirs(settings.data_dir, exist_ok=True)
         os.makedirs(settings.blob_dir, exist_ok=True)
         os.makedirs(settings.keys_dir, exist_ok=True)

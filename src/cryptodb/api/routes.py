@@ -828,6 +828,59 @@ async def replication_retry(
     ]
 
 
+@router.get("/replication/changes")
+async def replication_changes(
+    since_sequence: int = 0,
+    limit: int = 100,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[dict]:
+    """Pull replication: fetch changes since a sequence number."""
+    require_permission(user, "admin")
+    repl = ReplicationEngine()
+    changes = await repl.get_changes_since(session, since_sequence, limit=limit)
+    return changes
+
+
+@router.post("/replication/reset-sync")
+async def replication_reset_sync(
+    node_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Force full re-sync for a node."""
+    require_permission(user, "admin")
+    repl = ReplicationEngine()
+    result = await repl.reset_sync(session, node_id)
+    await session.commit()
+    return result
+
+
+@router.get("/replication/dead-letter")
+async def list_dead_letter(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> list[dict]:
+    """List dead letter queue entries."""
+    require_permission(user, "admin")
+    from cryptodb.db.metadata import ReplicationDeadLetter
+    result = await session.execute(
+        select(ReplicationDeadLetter).order_by(ReplicationDeadLetter.created_at.desc())
+    )
+    rows = result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "record_id": r.record_id,
+            "node_id": r.node_id,
+            "sequence_number": r.sequence_number,
+            "error_history": r.error_history,
+            "created_at": r.created_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Standby-side endpoints (called by primary)
 # ---------------------------------------------------------------------------

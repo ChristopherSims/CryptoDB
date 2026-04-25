@@ -280,6 +280,65 @@ class CryptoDBEngine:
 
         logger.info("Record deleted", extra={"event": "record_deleted", "actor": user.username, "record_id": record_id})
 
+    async def purge_soft_deleted(self, session: AsyncSession, user: User) -> int:
+        """Permanently purge soft-deleted records past retention period."""
+        if not has_permission(user, "admin"):
+            raise PermissionError("Admin required")
+        from datetime import timedelta
+        from sqlalchemy import delete
+        cutoff = datetime.now(timezone.utc) - timedelta(days=settings.purge_after_days)
+        result = await session.execute(
+            select(Record).where(Record.is_deleted == True, Record.deleted_at < cutoff)  # noqa: E712
+        )
+        records = result.scalars().all()
+        purged = 0
+        for record in records:
+            await self._blob.delete(record.blob_path)
+            await session.execute(
+                delete(Record).where(Record.id == record.id)
+            )
+            purged += 1
+            self._chain.append(
+                actor_id=user.id,
+                action="purge",
+                resource_type="record",
+                resource_id=record.id,
+                details={"deleted_at": record.deleted_at.isoformat() if record.deleted_at else None},
+            )
+        await self._persist_audit(session)
+        logger.info("Purged soft-deleted records", extra={"count": purged})
+        return purged
+
+    async def integrity_scan(self, session: AsyncSession, user: User, sample_size: int = 10) -> list[dict]:
+        """Sample random blobs and verify HMAC integrity."""
+        if not has_permission(user, "admin"):
+            raise PermissionError("Admin required")
+        import random
+        result = await session.execute(
+            select(Record).where(Record.is_deleted == False)  # noqa: E712
+        )
+        records = result.scalars().all()
+        if not records:
+            return []
+        sample = random.sample(records, min(sample_size, len(records)))
+        findings: list[dict] = []
+        for record in sample:
+            try:
+                ciphertext = await self._blob.read(record.blob_path)
+                integ = IntegrityToken.from_dict(record.integrity_token)
+                ok = verify_hmac(ciphertext, integ, self._integ_key)
+                findings.append({"record_id": record.id, "ok": ok})
+                if not ok:
+                    logger.error("Integrity check failed", extra={"record_id": record.id})
+                    from cryptodb.integrations.webhook import send_webhook
+                    await send_webhook(
+                        "integrity.failure",
+                        {"record_id": record.id, "blob_path": record.blob_path},
+                    )
+            except Exception as exc:
+                findings.append({"record_id": record.id, "ok": False, "error": str(exc)})
+        return findings
+
     async def search_by_index(
         self,
         session: AsyncSession,
@@ -457,7 +516,42 @@ class CryptoDBEngine:
             audit_rows.append(log)
         await session.flush()
 
+        # Create checkpoint if interval reached
+        if new_entries and settings.ledger_checkpoint_interval > 0:
+            total_entries = len(entries)
+            if total_entries % settings.ledger_checkpoint_interval == 0:
+                checkpoint = self._chain.create_checkpoint(
+                    checkpoint_number=total_entries // settings.ledger_checkpoint_interval,
+                    signing_key=self._master_key,
+                )
+                from cryptodb.db.metadata import LedgerCheckpoint as LedgerCheckpointModel
+                session.add(LedgerCheckpointModel(
+                    checkpoint_number=checkpoint.checkpoint_number,
+                    last_entry_hash=checkpoint.last_entry_hash,
+                    timestamp=checkpoint.timestamp,
+                    signature=checkpoint.signature,
+                ))
+                await session.flush()
+                logger.info("Ledger checkpoint created", extra={"checkpoint_number": checkpoint.checkpoint_number})
+
         # Replicate audit entries
         if settings.replication_enabled and self._repl is not None and audit_rows:
             for row in audit_rows:
                 await self._repl.sync_audit_entry(session, row)
+
+        # Webhook for critical events
+        if settings.webhook_url and audit_rows:
+            for row in audit_rows:
+                if row.action in ("delete", "auth_failure") or row.result == "failure":
+                    from cryptodb.integrations.webhook import send_webhook
+                    await send_webhook(
+                        "audit.critical",
+                        {
+                            "action": row.action,
+                            "actor_id": row.actor_id,
+                            "resource_type": row.resource_type,
+                            "resource_id": row.resource_id,
+                            "result": row.result,
+                            "details": row.details,
+                        },
+                    )

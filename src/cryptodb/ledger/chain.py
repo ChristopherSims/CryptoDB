@@ -170,3 +170,35 @@ class HashChain:
 
     def get_entries(self) -> list[LedgerEntry]:
         return list(self._entries)
+
+    def create_checkpoint(self, checkpoint_number: int, signing_key: bytes) -> "LedgerCheckpoint":
+        """Create a signed checkpoint of the current chain state."""
+        import hmac
+        import hashlib
+        timestamp = datetime.now(timezone.utc)
+        data = f"{checkpoint_number}||{self._last_hash}||{timestamp.isoformat()}"
+        signature = hmac.new(signing_key, data.encode(), hashlib.sha3_256).hexdigest()
+        return LedgerCheckpoint(
+            checkpoint_number=checkpoint_number,
+            last_entry_hash=self._last_hash,
+            timestamp=timestamp,
+            signature=signature,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerCheckpoint:
+    """A signed checkpoint of the ledger state."""
+
+    checkpoint_number: int
+    last_entry_hash: str
+    timestamp: datetime
+    signature: str
+
+    def to_dict(self) -> dict:
+        return {
+            "checkpoint_number": self.checkpoint_number,
+            "last_entry_hash": self.last_entry_hash,
+            "timestamp": self.timestamp.isoformat(),
+            "signature": self.signature,
+        }

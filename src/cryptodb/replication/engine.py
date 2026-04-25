@@ -6,13 +6,20 @@ import secrets
 from datetime import datetime, timezone
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cryptodb.auth.rbac import has_permission
 from cryptodb.config import settings
 from cryptodb.crypto.integrity import compute_hmac
-from cryptodb.db.metadata import AuditLog, Record, ReplicationLog, ReplicationNode, User
+from cryptodb.db.metadata import (
+    AuditLog,
+    Record,
+    ReplicationDeadLetter,
+    ReplicationLog,
+    ReplicationNode,
+    User,
+)
 from cryptodb.storage.blob import BlobStore
 
 logger = logging.getLogger(__name__)
@@ -31,6 +38,15 @@ class ReplicationEngine:
     def __init__(self, blob_store: BlobStore | None = None) -> None:
         self._blob = blob_store or BlobStore()
 
+    def _enforce_tls(self, endpoint_url: str) -> None:
+        if settings.replication_allow_http:
+            return
+        if not endpoint_url.startswith("https://"):
+            raise ValueError(
+                f"Replication endpoint must use HTTPS: {endpoint_url}. "
+                f"Set CRYPTODB_REPLICATION_ALLOW_HTTP=true to allow HTTP in development."
+            )
+
     async def register_node(
         self,
         session: AsyncSession,
@@ -42,6 +58,7 @@ class ReplicationEngine:
         if not has_permission(user, "admin"):
             raise PermissionError("Admin required")
 
+        self._enforce_tls(endpoint_url)
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha3_256(token.encode()).hexdigest()
         node = ReplicationNode(
@@ -70,12 +87,6 @@ class ReplicationEngine:
         if node is None:
             raise ValueError("Node not found")
 
-        await session.execute(
-            select(ReplicationLog)
-            .where(ReplicationLog.node_id == node_id, ReplicationLog.status.in_(["pending", "sent"]))
-        )
-        # Bulk update not available easily in async ORM without sync call; do per-row later or use Core
-        from sqlalchemy import update
         await session.execute(
             update(ReplicationLog)
             .where(ReplicationLog.node_id == node_id, ReplicationLog.status.in_(["pending", "sent"]))
@@ -172,7 +183,26 @@ class ReplicationEngine:
                     log.retry_count += 1
                 logs.append(log)
         await session.flush()
+
+        # Move permanently failed to dead letter queue
+        await self._process_dead_letter(session, logs)
         return logs
+
+    async def _process_dead_letter(self, session: AsyncSession, logs: list[ReplicationLog]) -> None:
+        max_retries = settings.replication_retry_max
+        for log in logs:
+            if log.status == "failed" and log.retry_count >= max_retries:
+                dl = ReplicationDeadLetter(
+                    record_id=log.record_id,
+                    node_id=log.node_id,
+                    metadata_snapshot=log.metadata_snapshot,
+                    blob_checksum=log.blob_checksum,
+                    sequence_number=log.sequence_number,
+                    error_history=[{"error": log.error_message, "at": datetime.now(timezone.utc).isoformat()}],
+                )
+                session.add(dl)
+                await session.delete(log)
+        await session.flush()
 
     async def _push_record(
         self,
@@ -289,4 +319,45 @@ class ReplicationEngine:
                 log.error_message = err
                 retried.append(log)
         await session.flush()
+        await self._process_dead_letter(session, retried)
         return retried
+
+    # ------------------------------------------------------------------
+    # Pull replication (standby -> primary)
+    # ------------------------------------------------------------------
+
+    async def get_changes_since(
+        self,
+        session: AsyncSession,
+        since_sequence: int,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return replication log entries newer than *since_sequence*."""
+        result = await session.execute(
+            select(ReplicationLog)
+            .where(ReplicationLog.sequence_number > since_sequence)
+            .order_by(ReplicationLog.sequence_number)
+            .limit(limit)
+        )
+        logs = result.scalars().all()
+        return [
+            {
+                "sequence_number": log.sequence_number,
+                "record_id": log.record_id,
+                "metadata_snapshot": log.metadata_snapshot,
+                "blob_checksum": log.blob_checksum,
+                "status": log.status,
+            }
+            for log in logs
+        ]
+
+    async def reset_sync(self, session: AsyncSession, node_id: str) -> dict:
+        """Force full re-sync for a node: clear its logs and return current state."""
+        result = await session.execute(
+            select(ReplicationLog).where(ReplicationLog.node_id == node_id)
+        )
+        logs = result.scalars().all()
+        for log in logs:
+            await session.delete(log)
+        await session.flush()
+        return {"status": "reset", "node_id": node_id, "cleared_logs": len(logs)}
