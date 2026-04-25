@@ -66,7 +66,7 @@ class TestRecords:
 
     async def test_audit_requires_auth(self, client: AsyncClient) -> None:
         r = await client.get("/api/v1/audit")
-        assert r.status_code == 403  # or 401 depending on middleware
+        assert r.status_code == 401
 
     async def test_health(self, client: AsyncClient) -> None:
         r = await client.get("/api/v1/health")

@@ -2,7 +2,8 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from cryptodb.api.routes import router
 
@@ -21,6 +22,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(router, prefix="/api/v1")
+
+    @app.exception_handler(PermissionError)
+    async def permission_error_handler(request: Request, exc: PermissionError) -> JSONResponse:  # noqa: ARG001
+        return JSONResponse(
+            status_code=403,
+            content={"detail": str(exc)},
+        )
+
     return app
 
 
