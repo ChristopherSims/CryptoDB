@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     replication_interval_seconds: int = Field(default=60, description="Background replication interval")
     replication_allow_http: bool = Field(default=False, description="Allow HTTP (non-TLS) replication endpoints")
 
+    # Key rotation
+    key_rotation_interval_hours: int = Field(
+        default=0, description="Hours between automatic key rotations (0=disabled)"
+    )
+
     # Key recovery
     recovery_shards: int = Field(default=0, description="Shamir secret sharing shards (0=disabled)")
     recovery_threshold: int = Field(default=0, description="Shamir threshold")

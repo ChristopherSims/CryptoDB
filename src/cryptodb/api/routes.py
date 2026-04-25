@@ -220,6 +220,52 @@ class HealthResponse(BaseModel):
     ledger_integrity_ok: bool
 
 
+class KeyVersionResponse(BaseModel):
+    versions: list[str]
+    active: str
+
+
+class RotateKeyPayload(BaseModel):
+    passphrase: str
+
+
+class RotateKeyResponse(BaseModel):
+    status: str
+    new_key_id: str
+    rotated_records: int
+
+
+class RecoverySplitPayload(BaseModel):
+    passphrase: str
+    threshold: int
+    total_shares: int
+
+
+class RecoverySplitResponse(BaseModel):
+    shares: list[str]
+
+
+class RecoveryCombinePayload(BaseModel):
+    shares: list[str]
+
+
+class RecoveryCombineResponse(BaseModel):
+    status: str
+    key_id: str
+
+
+class SchedulerConfigPayload(BaseModel):
+    auto_rotate: bool | None = None
+    interval_hours: int | None = None
+
+
+class SchedulerStatusResponse(BaseModel):
+    auto_rotate: bool
+    interval_hours: int
+    last_rotation: str | None
+    next_rotation: str | None
+
+
 @router.post("/init", status_code=status.HTTP_204_NO_CONTENT)
 async def init_database() -> None:
     await init_db()
@@ -1133,4 +1179,131 @@ async def unseal_master_key(
     _repl_engine = ReplicationEngine() if settings.replication_enabled else None
     _engine = CryptoDBEngine(kek, hash_chain=chain, replication_engine=_repl_engine)
     return {"status": "unsealed", "key_id": settings.master_key_id}
+
+
+@router.get("/master-key/versions", response_model=KeyVersionResponse)
+async def list_key_versions(
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> KeyVersionResponse:
+    """List all stored master key versions. Admin only."""
+    require_permission(user, "admin")
+    ks = MasterKeyStore()
+    versions = ks.list_key_versions()
+    return KeyVersionResponse(versions=versions, active=settings.master_key_id)
+
+
+@router.post("/master-key/rotate", response_model=RotateKeyResponse)
+async def rotate_master_key(
+    payload: RotateKeyPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> RotateKeyResponse:
+    """Rotate the master key and re-encrypt all active records. Admin only."""
+    require_permission(user, "admin")
+    from cryptodb.crypto.rotation import RotationScheduler
+
+    ks = MasterKeyStore()
+    scheduler = RotationScheduler()
+    new_key_id = await scheduler.run_auto_rotation(session, ks, payload.passphrase)
+    # Reload engine with new key as active, keeping old keys available
+    all_versions = ks.list_key_versions()
+    master_keys = {}
+    for vid in all_versions:
+        try:
+            master_keys[vid] = ks.load_master_key(payload.passphrase, vid)
+        except Exception:
+            pass
+    chain = await CryptoDBEngine.load_chain(session)
+    global _engine, _repl_engine
+    _repl_engine = ReplicationEngine() if settings.replication_enabled else None
+    _engine = CryptoDBEngine(
+        master_keys=master_keys,
+        active_key_id=new_key_id,
+        hash_chain=chain,
+        replication_engine=_repl_engine,
+    )
+    await session.commit()
+    return RotateKeyResponse(
+        status="rotated",
+        new_key_id=new_key_id,
+        rotated_records=len([r for r in (await session.execute(select(Record).where(Record.is_deleted == False))).scalars().all()]),
+    )
+
+
+@router.post("/master-key/recovery/split", response_model=RecoverySplitResponse)
+async def split_recovery_key(
+    payload: RecoverySplitPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> RecoverySplitResponse:
+    """Split the current master key into Shamir shares. Admin only."""
+    require_permission(user, "admin")
+    from cryptodb.crypto.recovery import split_secret
+    from cryptodb.crypto.keystore import MasterKeyStore
+
+    ks = MasterKeyStore()
+    kek = ks.load_master_key(payload.passphrase)
+    shares = split_secret(kek, threshold=payload.threshold, total_shares=payload.total_shares)
+    return RecoverySplitResponse(shares=[sh.to_b64() for sh in shares])
+
+
+@router.post("/master-key/recovery/combine", response_model=RecoveryCombineResponse)
+async def combine_recovery_key(
+    payload: RecoveryCombinePayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> RecoveryCombineResponse:
+    """Combine Shamir shares to recover the master key and re-initialize engine. Admin only."""
+    require_permission(user, "admin")
+    from cryptodb.crypto.recovery import recover_secret, Share
+
+    shares = [Share.from_b64(s) for s in payload.shares]
+    kek = recover_secret(shares)
+    chain = await CryptoDBEngine.load_chain(session)
+    global _engine, _repl_engine
+    _repl_engine = ReplicationEngine() if settings.replication_enabled else None
+    _engine = CryptoDBEngine(kek, hash_chain=chain, replication_engine=_repl_engine)
+    return RecoveryCombineResponse(status="recovered", key_id=settings.master_key_id)
+
+
+@router.get("/master-key/scheduler", response_model=SchedulerStatusResponse)
+async def get_scheduler_status(
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SchedulerStatusResponse:
+    """Get key rotation scheduler status. Admin only."""
+    require_permission(user, "admin")
+    from cryptodb.crypto.rotation import RotationScheduler
+
+    scheduler = RotationScheduler()
+    state = scheduler._state
+    next_rot = scheduler.get_next_rotation()
+    return SchedulerStatusResponse(
+        auto_rotate=state.auto_rotate,
+        interval_hours=state.interval_hours,
+        last_rotation=state.last_rotation.isoformat() if state.last_rotation else None,
+        next_rotation=next_rot.isoformat() if next_rot else None,
+    )
+
+
+@router.post("/master-key/scheduler", response_model=SchedulerStatusResponse)
+async def set_scheduler_config(
+    payload: SchedulerConfigPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SchedulerStatusResponse:
+    """Configure key rotation scheduler. Admin only."""
+    require_permission(user, "admin")
+    from cryptodb.crypto.rotation import RotationScheduler
+
+    scheduler = RotationScheduler()
+    scheduler.configure(
+        auto_rotate=payload.auto_rotate,
+        interval_hours=payload.interval_hours,
+    )
+    state = scheduler._state
+    next_rot = scheduler.get_next_rotation()
+    return SchedulerStatusResponse(
+        auto_rotate=state.auto_rotate,
+        interval_hours=state.interval_hours,
+        last_rotation=state.last_rotation.isoformat() if state.last_rotation else None,
+        next_rotation=next_rot.isoformat() if next_rot else None,
+    )
 
