@@ -68,7 +68,8 @@ class TestPutGetDelete:
         await engine.delete(session, user, record.id, secure=False)
         await session.commit()
 
-        with pytest.raises(ValueError, match="Record not found"):
+        from cryptodb.exceptions import RecordNotFoundError
+        with pytest.raises(RecordNotFoundError, match="Record not found"):
             await engine.get(session, user, record.id)
 
     async def test_audit_log(self, session: AsyncSession, user, engine: CryptoDBEngine) -> None:

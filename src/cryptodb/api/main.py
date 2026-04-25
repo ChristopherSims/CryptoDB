@@ -4,17 +4,25 @@ import uuid
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer
 
 from cryptodb.api.routes import router
 from cryptodb.config import settings
 from cryptodb.db.connection import _engine, reset_engine
+from cryptodb.exceptions import (
+    AuthenticationError,
+    AuthorizationError,
+    ConfigurationError,
+    CryptoDBException,
+    IntegrityError,
+    KeyManagementError,
+    RecordNotFoundError,
+    ReplicationError,
+    ValidationError,
+)
 from cryptodb.logging_config import setup_logging
-
-security = HTTPBearer()
 
 
 @asynccontextmanager
@@ -28,6 +36,17 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     if _engine is not None:
         await _engine.dispose()
         reset_engine()
+
+
+def _error_response(exc: CryptoDBException) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={
+            "error": exc.message,
+            "code": exc.error_code,
+            "detail": exc.detail,
+        },
+    )
 
 
 def create_app() -> FastAPI:
@@ -81,12 +100,52 @@ def create_app() -> FastAPI:
 
     app.include_router(router, prefix="/api/v1")
 
+    # ------------------------------------------------------------------
+    # Exception handlers
+    # ------------------------------------------------------------------
+
     @app.exception_handler(PermissionError)
     async def permission_error_handler(request: Request, exc: PermissionError) -> JSONResponse:  # noqa: ARG001
         return JSONResponse(
             status_code=403,
-            content={"detail": str(exc)},
+            content={"error": str(exc), "code": "AUTHORIZATION_ERROR", "detail": {}},
         )
+
+    @app.exception_handler(CryptoDBException)
+    async def cryptodb_exception_handler(request: Request, exc: CryptoDBException) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(AuthenticationError)
+    async def auth_error_handler(request: Request, exc: AuthenticationError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(AuthorizationError)
+    async def authorization_error_handler(request: Request, exc: AuthorizationError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(RecordNotFoundError)
+    async def not_found_error_handler(request: Request, exc: RecordNotFoundError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(IntegrityError)
+    async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(KeyManagementError)
+    async def key_error_handler(request: Request, exc: KeyManagementError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(ReplicationError)
+    async def replication_error_handler(request: Request, exc: ReplicationError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(ConfigurationError)
+    async def config_error_handler(request: Request, exc: ConfigurationError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
+
+    @app.exception_handler(ValidationError)
+    async def validation_error_handler(request: Request, exc: ValidationError) -> JSONResponse:  # noqa: ARG001
+        return _error_response(exc)
 
     return app
 

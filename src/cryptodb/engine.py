@@ -15,6 +15,12 @@ from cryptodb.crypto.envelope import Envelope, EnvelopeCipher
 from cryptodb.crypto.he import HEEncryptedNumber, HEKeyPair, PaillierHE
 from cryptodb.crypto.integrity import IntegrityToken, compute_hmac, verify_hmac
 from cryptodb.crypto.keystore import MasterKeyStore
+from cryptodb.exceptions import (
+    AuthorizationError,
+    ConfigurationError,
+    IntegrityError,
+    RecordNotFoundError,
+)
 from cryptodb.crypto.searchable import SearchableCipher
 from cryptodb.db.metadata import AuditLog, Record, User
 from cryptodb.ledger.chain import HashChain
@@ -76,7 +82,7 @@ class CryptoDBEngine:
     def _get_he(self) -> PaillierHE:
         """Return cached PaillierHE instance."""
         if self._he is None:
-            raise RuntimeError("HE keypair not initialized")
+            raise ConfigurationError("HE keypair not initialized")
         return self._he
 
     def init_he_keypair(self) -> HEKeyPair:
@@ -118,7 +124,7 @@ class CryptoDBEngine:
     ) -> Record:
         """Encrypt and store a record; return the DB row."""
         if not has_permission(user, "create"):
-            raise PermissionError("User cannot create records")
+            raise AuthorizationError("User cannot create records")
 
         # Quota check
         if user.quota_bytes is not None and not has_permission(user, "admin"):
@@ -204,10 +210,10 @@ class CryptoDBEngine:
         result = await session.execute(select(Record).where(Record.id == record_id, Record.is_deleted == False))  # noqa: E712
         record = result.scalar_one_or_none()
         if record is None:
-            raise ValueError("Record not found")
+            raise RecordNotFoundError("Record not found")
         if not (record.owner_id == user.id or await can_access(session, user, record, "read")):
             if not has_permission(user, "admin"):
-                raise PermissionError("Access denied")
+                raise AuthorizationError("Access denied")
 
         # Read blob
         ciphertext = await self._blob.read(record.blob_path)
@@ -215,7 +221,7 @@ class CryptoDBEngine:
         # Verify integrity
         integ = IntegrityToken.from_dict(record.integrity_token)
         if not verify_hmac(ciphertext, integ, self._integ_key):
-            raise ValueError("Integrity check failed")
+            raise IntegrityError("Integrity check failed")
 
         from cryptodb.crypto.envelope import EncryptedDataKey
 
@@ -253,10 +259,10 @@ class CryptoDBEngine:
         result = await session.execute(select(Record).where(Record.id == record_id))
         record = result.scalar_one_or_none()
         if record is None:
-            raise ValueError("Record not found")
+            raise RecordNotFoundError("Record not found")
         if not (record.owner_id == user.id or await can_access(session, user, record, "delete")):
             if not has_permission(user, "admin"):
-                raise PermissionError("Access denied")
+                raise AuthorizationError("Access denied")
 
         record.is_deleted = True
         record.deleted_at = datetime.now(timezone.utc)
@@ -283,7 +289,7 @@ class CryptoDBEngine:
     async def purge_soft_deleted(self, session: AsyncSession, user: User) -> int:
         """Permanently purge soft-deleted records past retention period."""
         if not has_permission(user, "admin"):
-            raise PermissionError("Admin required")
+            raise AuthorizationError("Admin required")
         from datetime import timedelta
         from sqlalchemy import delete
         cutoff = datetime.now(timezone.utc) - timedelta(days=settings.purge_after_days)
@@ -312,7 +318,7 @@ class CryptoDBEngine:
     async def integrity_scan(self, session: AsyncSession, user: User, sample_size: int = 10) -> list[dict]:
         """Sample random blobs and verify HMAC integrity."""
         if not has_permission(user, "admin"):
-            raise PermissionError("Admin required")
+            raise AuthorizationError("Admin required")
         import random
         result = await session.execute(
             select(Record).where(Record.is_deleted == False)  # noqa: E712
@@ -348,7 +354,7 @@ class CryptoDBEngine:
     ) -> list[str]:
         """Search records by blind index without decrypting."""
         if not has_permission(user, "read"):
-            raise PermissionError("Access denied")
+            raise AuthorizationError("Access denied")
         sc = SearchableCipher(self._search_key)
         target_idx = sc.index(token_plaintext, field_name=field_name)
         target_b64 = base64.b64encode(target_idx.token).decode()
@@ -377,7 +383,7 @@ class CryptoDBEngine:
     ) -> list[dict]:
         """List accessible records with pagination."""
         if not has_permission(user, "read"):
-            raise PermissionError("Access denied")
+            raise AuthorizationError("Access denied")
         stmt = select(Record).where(Record.is_deleted == False).order_by(Record.created_at.desc())  # noqa: E712
         result = await session.execute(stmt)
         all_records = result.scalars().all()
@@ -400,7 +406,7 @@ class CryptoDBEngine:
     async def audit_log(self, session: AsyncSession, user: User, run_anomaly_detection: bool = False) -> list[dict]:
         """Return audit entries for admins/auditors."""
         if not has_permission(user, "audit"):
-            raise PermissionError("Access denied")
+            raise AuthorizationError("Access denied")
 
         result = await session.execute(
             select(AuditLog).order_by(AuditLog.entry_number)
@@ -450,9 +456,9 @@ class CryptoDBEngine:
     ) -> HEEncryptedNumber:
         """Compute an encrypted sum of *field* across *record_ids* without decrypting."""
         if not has_permission(user, "read"):
-            raise PermissionError("Access denied")
+            raise AuthorizationError("Access denied")
         if self._he is None:
-            raise RuntimeError("HE not initialized")
+            raise ConfigurationError("HE not initialized")
 
         result: HEEncryptedNumber | None = None
         for rid in record_ids:
@@ -472,7 +478,7 @@ class CryptoDBEngine:
                 result = self._he.add(result, enc)
 
         if result is None:
-            raise ValueError("No valid HE fields found for aggregation")
+            raise ConfigurationError("No valid HE fields found for aggregation")
         return result
 
     async def he_decrypt_aggregate(
@@ -483,9 +489,9 @@ class CryptoDBEngine:
     ) -> int | float:
         """Decrypt an aggregated HE value. Requires private key."""
         if not has_permission(user, "audit"):
-            raise PermissionError("Access denied")
+            raise AuthorizationError("Access denied")
         if self._he is None or not self._he.has_private_key():
-            raise RuntimeError("HE private key not available")
+            raise ConfigurationError("HE private key not available")
         return self._he.decrypt(enc)
 
     async def _persist_audit(self, session: AsyncSession) -> None:

@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from cryptodb.config import settings
+from cryptodb.exceptions import KeyManagementError
 
 
 class KeyStoreError(Exception):
@@ -37,7 +38,7 @@ class MasterKeyStore:
         key_id = key_id or settings.master_key_id
         key_path = self._key_path(key_id)
         if key_path.exists():
-            raise KeyStoreError(f"Master key '{key_id}' already exists")
+            raise KeyManagementError(f"Master key '{key_id}' already exists")
 
         salt = os.urandom(32)
         kek = os.urandom(key_size)
@@ -66,7 +67,7 @@ class MasterKeyStore:
         salt_path = self._salt_path(key_id)
 
         if not key_path.exists():
-            raise KeyStoreError(f"Master key '{key_id}' not found")
+            raise KeyManagementError(f"Master key '{key_id}' not found")
 
         enc_kek = key_path.read_bytes()
         salt = salt_path.read_bytes()
@@ -86,7 +87,7 @@ class MasterKeyStore:
     def get_master_key(self) -> bytes:
         """Return cached master key or raise."""
         if self._master_key is None:
-            raise KeyStoreError("Master key not loaded. Call load_master_key() first.")
+            raise KeyManagementError("Master key not loaded. Call load_master_key() first.")
         return self._master_key
 
     def rotate_master_key(
