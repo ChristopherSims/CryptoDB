@@ -81,3 +81,22 @@ class TestPutGetDelete:
 
         failures = await engine.verify_ledger()
         assert failures == []
+
+    async def test_he_fields(self, session: AsyncSession, user, engine: CryptoDBEngine) -> None:
+        engine.init_he_keypair()
+        record = await engine.put(session, user, b"salary data", he_fields={"salary": 50000.0})
+        await session.commit()
+
+        retrieved = await engine.get(session, user, record.id)
+        assert retrieved == b"salary data"
+
+    async def test_he_sum(self, session: AsyncSession, user, engine: CryptoDBEngine) -> None:
+        engine.init_he_keypair()
+        r1 = await engine.put(session, user, b"a", he_fields={"amount": 100.0})
+        r2 = await engine.put(session, user, b"b", he_fields={"amount": 200.0})
+        r3 = await engine.put(session, user, b"c", he_fields={"amount": 300.0})
+        await session.commit()
+
+        enc_sum = await engine.he_sum(session, user, [r1.id, r2.id, r3.id], "amount")
+        decrypted = await engine.he_decrypt_aggregate(session, user, enc_sum)
+        assert abs(decrypted - 600.0) < 0.1

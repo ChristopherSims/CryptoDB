@@ -36,6 +36,7 @@ class PutPayload(BaseModel):
     cipher_name: str | None = None
     compress: str = "zstd"
     searchable: dict[str, str] | None = None
+    he_fields: dict[str, float] | None = None
 
 
 class PutResponse(BaseModel):
@@ -46,6 +47,23 @@ class PutResponse(BaseModel):
 class GetResponse(BaseModel):
     data_b64: str
     record_id: str
+
+
+class HESumPayload(BaseModel):
+    record_ids: list[str]
+    field: str
+
+
+class HESumResponse(BaseModel):
+    encrypted_sum: dict[str, int]
+
+
+class HEDecryptPayload(BaseModel):
+    encrypted_sum: dict[str, int]
+
+
+class HEDecryptResponse(BaseModel):
+    decrypted_value: float
 
 
 class LoginPayload(BaseModel):
@@ -101,6 +119,7 @@ async def create_record(
         cipher_name=payload.cipher_name,
         compress_algo=payload.compress,
         searchable_fields=payload.searchable,
+        he_fields=payload.he_fields,
     )
     await session.commit()
     return PutResponse(record_id=record.id, size_bytes=record.size_bytes)
@@ -237,3 +256,41 @@ async def soc2_report(
         "summary": report.summary,
         "findings": report.findings,
     }
+
+
+@router.post("/he/init")
+async def init_he(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Generate a Paillier HE keypair. Admin only."""
+    require_permission(user, "admin")
+    engine = get_engine()
+    he_keypair = engine.init_he_keypair()
+    return {"status": "created", "public_key_n": str(he_keypair.public_key_n)}
+
+
+@router.post("/he/sum", response_model=HESumResponse)
+async def he_sum_endpoint(
+    payload: HESumPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> HESumResponse:
+    """Compute an encrypted sum of a field across records without decrypting."""
+    engine = get_engine()
+    result = await engine.he_sum(session, user, payload.record_ids, payload.field)
+    return HESumResponse(encrypted_sum=result.to_dict())
+
+
+@router.post("/he/decrypt", response_model=HEDecryptResponse)
+async def he_decrypt_endpoint(
+    payload: HEDecryptPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> HEDecryptResponse:
+    """Decrypt an aggregated HE value. Auditor/admin only."""
+    from cryptodb.crypto.he import HEEncryptedNumber
+    engine = get_engine()
+    enc = HEEncryptedNumber.from_dict(payload.encrypted_sum)
+    value = await engine.he_decrypt_aggregate(session, user, enc)
+    return HEDecryptResponse(decrypted_value=float(value))

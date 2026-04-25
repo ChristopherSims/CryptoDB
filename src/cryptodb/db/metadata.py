@@ -55,6 +55,7 @@ class Record(Base):
     encrypted_dek: Mapped[dict] = mapped_column(JSON, nullable=False)
     integrity_token: Mapped[dict] = mapped_column(JSON, nullable=False)
     searchable_indices: Mapped[dict | None] = mapped_column(JSON)
+    he_fields: Mapped[dict | None] = mapped_column(JSON)
     size_bytes: Mapped[int] = mapped_column(default=0)
     version: Mapped[int] = mapped_column(default=1)
     previous_version_id: Mapped[str | None] = mapped_column(ForeignKey("records.id"), nullable=True)

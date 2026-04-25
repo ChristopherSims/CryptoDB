@@ -67,6 +67,7 @@ class CryptoDBClient:
         cipher_name: str | None = None,
         compress: str = "zstd",
         searchable: dict[str, str] | None = None,
+        he_fields: dict[str, float] | None = None,
     ) -> dict:
         if self._token is None:
             raise RuntimeError("Not authenticated")
@@ -78,6 +79,8 @@ class CryptoDBClient:
             payload["cipher_name"] = cipher_name
         if searchable:
             payload["searchable"] = searchable
+        if he_fields:
+            payload["he_fields"] = he_fields
         r = await self._client.post(
             f"{self._base}/records",
             json=payload,
@@ -113,6 +116,38 @@ class CryptoDBClient:
             raise RuntimeError("Not authenticated")
         r = await self._client.get(
             f"{self._base}/audit",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def init_he(self) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/he/init",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def he_sum(self, record_ids: list[str], field: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/he/sum",
+            json={"record_ids": record_ids, "field": field},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def he_decrypt(self, encrypted_sum: dict[str, int]) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/he/decrypt",
+            json={"encrypted_sum": encrypted_sum},
             headers={"Authorization": f"Bearer {self._token}"},
         )
         r.raise_for_status()
