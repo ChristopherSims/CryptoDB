@@ -31,6 +31,17 @@ class MasterKeyStore:
     def _salt_path(self, key_id: str) -> Path:
         return self._keys_dir / f"{key_id}.salt"
 
+    def list_key_versions(self) -> list[str]:
+        """Return all stored key IDs."""
+        versions = []
+        for p in self._keys_dir.glob("*.enc"):
+            versions.append(p.stem)
+        return sorted(versions)
+
+    def get_master_key_by_id(self, passphrase: str, key_id: str) -> bytes:
+        """Load a specific master key version by ID."""
+        return self.load_master_key(passphrase, key_id)
+
     def create_master_key(
         self, passphrase: str, key_id: str | None = None, key_size: int = 32
     ) -> bytes:

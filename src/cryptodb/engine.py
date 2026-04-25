@@ -19,6 +19,7 @@ from cryptodb.exceptions import (
     AuthorizationError,
     ConfigurationError,
     IntegrityError,
+    KeyManagementError,
     RecordNotFoundError,
 )
 from cryptodb.crypto.searchable import SearchableCipher
@@ -65,19 +66,42 @@ class CryptoDBEngine:
 
     def __init__(
         self,
-        master_key: bytes,
+        master_key: bytes | None = None,
+        master_keys: dict[str, bytes] | None = None,
+        active_key_id: str | None = None,
         blob_store: BlobStore | None = None,
         hash_chain: HashChain | None = None,
         replication_engine: ReplicationEngine | None = None,
     ) -> None:
-        self._env = EnvelopeCipher(master_key)
+        key_versions = {}
+        if master_keys is not None:
+            key_versions = master_keys
+        elif master_key is not None:
+            key_versions = {settings.master_key_id: master_key}
+        if not key_versions:
+            raise ConfigurationError("At least one master key must be provided")
+        self._env_versions: dict[str, EnvelopeCipher] = {
+            kid: EnvelopeCipher(k) for kid, k in key_versions.items()
+        }
+        self._active_key_id = active_key_id or settings.master_key_id
         self._blob = blob_store or BlobStore()
         self._chain = hash_chain or HashChain()
-        self._search_key = master_key  # In production, derive a separate key
-        self._integ_key = master_key  # In production, derive a separate key
-        self._master_key = master_key
+        active_key = key_versions.get(self._active_key_id)
+        if active_key is None:
+            raise ConfigurationError(f"Active key '{self._active_key_id}' not found in provided keys")
+        self._search_key = active_key
+        self._integ_key = active_key
+        self._master_key = active_key
+        self._master_keys = key_versions
         self._he: PaillierHE | None = None
         self._repl = replication_engine
+
+    def _get_env(self, key_id: str | None = None) -> EnvelopeCipher:
+        kid = key_id or self._active_key_id
+        cipher = self._env_versions.get(kid)
+        if cipher is None:
+            raise KeyManagementError(f"Key version '{kid}' not available in engine")
+        return cipher
 
     def _get_he(self) -> PaillierHE:
         """Return cached PaillierHE instance."""
@@ -136,13 +160,13 @@ class CryptoDBEngine:
             )
             used = result.scalar_one()
             if used + len(plaintext) > user.quota_bytes:
-                raise PermissionError(
+                raise AuthorizationError(
                     f"Storage quota exceeded: {used + len(plaintext)} > {user.quota_bytes}"
                 )
 
         # Compress then encrypt
         compressed = compress(plaintext, algorithm=compress_algo)
-        envelope = self._env.encrypt(compressed, cipher_name=cipher_name)
+        envelope = self._get_env().encrypt(compressed, cipher_name=cipher_name)
 
         # Integrity token over ciphertext
         integ = compute_hmac(envelope.ciphertext, self._integ_key)
@@ -232,7 +256,7 @@ class CryptoDBEngine:
             cipher_name=record.cipher_name,
             record_id=record.id,
         )
-        compressed = self._env.decrypt(envelope)
+        compressed = self._get_env(record.master_key_id).decrypt(envelope)
         plaintext = decompress(compressed)
 
         # Audit
