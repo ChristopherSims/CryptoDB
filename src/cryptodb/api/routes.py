@@ -1,7 +1,10 @@
 """FastAPI routes for CryptoDB."""
 
+import base64
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cryptodb.api.dependencies import get_current_user, get_db
@@ -117,6 +120,44 @@ class LoginResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+
+class HardwareRegisterBeginPayload(BaseModel):
+    name: str = "Primary Token"
+
+
+class HardwareRegisterBeginResponse(BaseModel):
+    public_credential_options: dict
+    challenge_token: str
+
+
+class HardwareRegisterFinishPayload(BaseModel):
+    challenge_token: str
+    client_response: dict
+
+
+class HardwareRegisterFinishResponse(BaseModel):
+    credential_id: str
+    status: str
+
+
+class HardwareAuthenticateBeginResponse(BaseModel):
+    public_request_options: dict
+    challenge_token: str
+
+
+class HardwareAuthenticateFinishPayload(BaseModel):
+    challenge_token: str
+    client_response: dict
+
+
+class SealMasterKeyPayload(BaseModel):
+    passphrase: str
+
+
+class SealMasterKeyResponse(BaseModel):
+    sealed_blob_b64: str
+    method: str
 
 
 @router.post("/init", status_code=status.HTTP_204_NO_CONTENT)
@@ -468,6 +509,172 @@ async def replication_receive_audit(
     payload: ReplicationAuditPayload,
 ) -> dict:
     """Receive an audit log entry from the primary node."""
-    # TODO: persist to local audit ledger if desired
+    # TODO: persist metadata snapshot to local metadata DB if desired
     return {"status": "acked", "entry_number": payload.entry_number}
+
+
+# ---------------------------------------------------------------------------
+# Hardware token endpoints (FIDO2 + TPM)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/hardware/register-begin", response_model=HardwareRegisterBeginResponse)
+async def hardware_register_begin(
+    payload: HardwareRegisterBeginPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> HardwareRegisterBeginResponse:
+    """Start FIDO2 hardware token registration."""
+    from cryptodb.auth.hardware import HardwareTokenManager
+    from cryptodb.auth.mfa import get_mfa_store
+
+    mgr = HardwareTokenManager()
+    if not mgr.fido2_available():
+        raise HTTPException(status_code=501, detail="FIDO2 not available")
+
+    existing = await mgr.get_credentials(session, user.id)
+    registration_data, state = mgr.register_begin(user, existing)
+    challenge_token = get_mfa_store().create(user.id, "fido2", state)
+    return HardwareRegisterBeginResponse(
+        public_credential_options=registration_data,
+        challenge_token=challenge_token,
+    )
+
+
+@router.post("/auth/hardware/register-finish", response_model=HardwareRegisterFinishResponse)
+async def hardware_register_finish(
+    payload: HardwareRegisterFinishPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> HardwareRegisterFinishResponse:
+    """Finish FIDO2 hardware token registration."""
+    from cryptodb.auth.hardware import HardwareTokenManager
+    from cryptodb.auth.mfa import get_mfa_store
+
+    mgr = HardwareTokenManager()
+    challenge = get_mfa_store().get(payload.challenge_token)
+    if challenge is None or challenge.user_id != user.id:
+        raise HTTPException(status_code=400, detail="Invalid or expired challenge token")
+
+    try:
+        credential = mgr.register_end(challenge.state, payload.client_response)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Registration verification failed: {exc}")
+
+    await mgr.save_credential(session, user.id, credential)
+    get_mfa_store().remove(payload.challenge_token)
+    await session.commit()
+
+    credential_id_b64 = base64.urlsafe_b64encode(credential.credential_id).decode().rstrip("=")
+    return HardwareRegisterFinishResponse(credential_id=credential_id_b64, status="registered")
+
+
+@router.post("/auth/hardware/authenticate-begin", response_model=HardwareAuthenticateBeginResponse)
+async def hardware_authenticate_begin(
+    payload: LoginPayload,
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> HardwareAuthenticateBeginResponse:
+    """Start FIDO2 hardware token authentication (step 1 of MFA login)."""
+    from cryptodb.auth.hardware import HardwareTokenManager
+    from cryptodb.auth.mfa import get_mfa_store
+    from cryptodb.auth.users import authenticate_user
+
+    user = await authenticate_user(session, payload.username, payload.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    mgr = HardwareTokenManager()
+    if not mgr.fido2_available():
+        raise HTTPException(status_code=501, detail="FIDO2 not available")
+
+    credentials = await mgr.get_credentials(session, user.id)
+    if not credentials:
+        raise HTTPException(status_code=400, detail="No hardware credentials registered")
+
+    auth_data, state = mgr.authenticate_begin(credentials)
+    challenge_token = get_mfa_store().create(user.id, "fido2", state)
+    return HardwareAuthenticateBeginResponse(
+        public_request_options=auth_data,
+        challenge_token=challenge_token,
+    )
+
+
+@router.post("/auth/hardware/authenticate-finish", response_model=LoginResponse)
+async def hardware_authenticate_finish(
+    payload: HardwareAuthenticateFinishPayload,
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> LoginResponse:
+    """Finish FIDO2 hardware token authentication (step 2 of MFA login)."""
+    import base64
+
+    from cryptodb.auth.hardware import HardwareTokenManager
+    from cryptodb.auth.mfa import get_mfa_store, issue_tokens
+    from cryptodb.auth.session import create_session
+
+    mgr = HardwareTokenManager()
+    challenge = get_mfa_store().get(payload.challenge_token)
+    if challenge is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired challenge token")
+
+    result = await session.execute(
+        select(User).where(User.id == challenge.user_id)
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=400, detail="User not found")
+
+    credentials = await mgr.get_credentials(session, user.id)
+    try:
+        verified_cred = mgr.authenticate_end(challenge.state, credentials, payload.client_response)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Authentication verification failed: {exc}")
+
+    await mgr.update_sign_count(session, user.id, verified_cred)
+    get_mfa_store().remove(payload.challenge_token)
+
+    access, refresh = await create_session(session, user)
+    await session.commit()
+    return LoginResponse(access_token=access, refresh_token=refresh)
+
+
+@router.post("/master-key/seal", response_model=SealMasterKeyResponse)
+async def seal_master_key(
+    payload: SealMasterKeyPayload,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SealMasterKeyResponse:
+    """Seal the master key using TPM (or software fallback). Admin only."""
+    require_permission(user, "admin")
+    from cryptodb.auth.hardware import HardwareTokenManager
+    from cryptodb.crypto.keystore import MasterKeyStore
+
+    mgr = HardwareTokenManager()
+    ks = MasterKeyStore()
+    kek = ks.load_master_key(payload.passphrase)
+    sealed = mgr.tpm_seal(kek)
+    method = "tpm" if mgr._tpm._esapi is not None else "software"
+    return SealMasterKeyResponse(
+        sealed_blob_b64=base64.b64encode(sealed).decode(),
+        method=method,
+    )
+
+
+@router.post("/master-key/unseal")
+async def unseal_master_key(
+    payload: SealMasterKeyPayload,
+    sealed_blob_b64: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Unseal the master key using TPM (or software fallback) and initialize engine. Admin only."""
+    require_permission(user, "admin")
+    from cryptodb.auth.hardware import HardwareTokenManager
+
+    mgr = HardwareTokenManager()
+    sealed = base64.b64decode(sealed_blob_b64)
+    kek = mgr.tpm_unseal(sealed)
+    chain = await CryptoDBEngine.load_chain(session)
+    global _engine, _repl_engine
+    _repl_engine = ReplicationEngine() if settings.replication_enabled else None
+    _engine = CryptoDBEngine(kek, hash_chain=chain, replication_engine=_repl_engine)
+    return {"status": "unsealed", "key_id": settings.master_key_id}
 

@@ -208,3 +208,71 @@ class CryptoDBClient:
         r.raise_for_status()
         return r.json()
 
+    # ------------------------------------------------------------------
+    # Hardware tokens
+    # ------------------------------------------------------------------
+
+    async def hardware_register_begin(self, name: str = "Primary Token") -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/auth/hardware/register-begin",
+            json={"name": name},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def hardware_register_finish(self, challenge_token: str, client_response: dict) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/auth/hardware/register-finish",
+            json={"challenge_token": challenge_token, "client_response": client_response},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def hardware_authenticate_begin(self, username: str, password: str) -> dict:
+        r = await self._client.post(
+            f"{self._base}/auth/hardware/authenticate-begin",
+            json={"username": username, "password": password},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def hardware_authenticate_finish(self, challenge_token: str, client_response: dict) -> TokenPair:
+        r = await self._client.post(
+            f"{self._base}/auth/hardware/authenticate-finish",
+            json={"challenge_token": challenge_token, "client_response": client_response},
+        )
+        r.raise_for_status()
+        data = r.json()
+        self._token = data["access_token"]
+        return TokenPair(access_token=data["access_token"], refresh_token=data["refresh_token"])
+
+    async def seal_master_key(self, passphrase: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/master-key/seal",
+            json={"passphrase": passphrase},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def unseal_master_key(self, passphrase: str, sealed_blob_b64: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/master-key/unseal",
+            json={"passphrase": passphrase},
+            params={"sealed_blob_b64": sealed_blob_b64},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+

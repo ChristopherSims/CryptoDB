@@ -27,6 +27,7 @@ dependencies = [
     "python-multipart>=0.0.6",
     "zstandard>=0.22.0",
     "phe>=1.5.0",
+    "fido2>=1.1.0",
 ]
 
 [project.optional-dependencies]

@@ -20,6 +20,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(String(32), default="reader", nullable=False)
     is_active: Mapped[bool] = mapped_column(default=True)
+    hardware_mfa_required: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -30,6 +31,7 @@ class User(Base):
 
     sessions: Mapped[list["Session"]] = relationship(back_populates="user", lazy="selectin")
     audit_entries: Mapped[list["AuditLog"]] = relationship(back_populates="user", lazy="selectin")
+    hardware_credentials: Mapped[list["HardwareTokenCredential"]] = relationship(back_populates="user", lazy="selectin")
 
 
 class Session(Base):
@@ -130,6 +132,27 @@ class KeyRotationLog(Base):
     rotated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     rotated_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending")  # pending, complete, failed
+
+
+class HardwareTokenCredential(Base):
+    __tablename__ = "hardware_token_credentials"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    credential_id: Mapped[str] = mapped_column(Text, nullable=False)  # base64url encoded credential ID
+    public_key: Mapped[str] = mapped_column(Text, nullable=False)  # base64url encoded COSE public key
+    token_type: Mapped[str] = mapped_column(String(16), nullable=False)  # fido2, tpm
+    sign_count: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    name: Mapped[str] = mapped_column(String(128), default="Primary Token")
+
+    user: Mapped["User"] = relationship(back_populates="hardware_credentials")
+
+    __table_args__ = (
+        Index("idx_hwcred_user", "user_id"),
+        Index("idx_hwcred_cid", "credential_id"),
+    )
 
 
 class ReplicationNode(Base):
