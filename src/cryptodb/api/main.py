@@ -1,10 +1,14 @@
 """FastAPI application factory."""
 
+import asyncio
+import logging
 import uuid
+from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
+from typing import Callable
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -25,17 +29,48 @@ from cryptodb.exceptions import (
 from cryptodb.logging_config import setup_logging
 
 
+async def _rotation_check_task() -> None:
+    """Background task that periodically checks if key rotation is due."""
+    logger = structlog.get_logger()
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            from cryptodb.crypto.rotation import RotationScheduler
+
+            scheduler = RotationScheduler()
+            if scheduler.should_rotate():
+                next_rot = scheduler.get_next_rotation()
+                logger.warning(
+                    "key_rotation_due",
+                    next_rotation=next_rot.isoformat() if next_rot else None,
+                    message="Master key rotation is due. Trigger manually via API or CLI.",
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("rotation_check_failed")
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     """Application lifespan events."""
-    setup_logging(level=settings.log_level)
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    setup_logging(level=level)
     logger = structlog.get_logger()
     logger.info("application_starting")
-    yield
-    logger.info("application_shutting_down")
-    if _engine is not None:
-        await _engine.dispose()
-        reset_engine()
+    rotation_task = asyncio.create_task(_rotation_check_task())
+    try:
+        yield
+    finally:
+        rotation_task.cancel()
+        try:
+            await rotation_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("application_shutting_down")
+        if _engine is not None:
+            await _engine.dispose()
+            reset_engine()
 
 
 def _error_response(exc: CryptoDBException) -> JSONResponse:
@@ -77,7 +112,7 @@ def create_app() -> FastAPI:
 
     # Request ID middleware
     @app.middleware("http")
-    async def request_id_middleware(request: Request, call_next):
+    async def request_id_middleware(request: Request, call_next: Callable[..., "Awaitable[Response]"]) -> Response:
         request_id = request.headers.get("x-request-id")
         if not request_id:
             request_id = str(uuid.uuid4())
@@ -88,7 +123,7 @@ def create_app() -> FastAPI:
 
     # Add logging context middleware
     @app.middleware("http")
-    async def logging_context_middleware(request: Request, call_next):
+    async def logging_context_middleware(request: Request, call_next: Callable[..., "Awaitable[Response]"]) -> Response:
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
             request_id=getattr(request.state, "request_id", ""),

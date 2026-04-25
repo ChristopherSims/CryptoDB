@@ -1,5 +1,7 @@
 """FastAPI dependency injection helpers."""
 
+from collections.abc import AsyncGenerator
+
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +16,7 @@ from cryptodb.db.metadata import User
 security = HTTPBearer()
 
 
-async def get_db():
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async for session in get_session():
         yield session
 

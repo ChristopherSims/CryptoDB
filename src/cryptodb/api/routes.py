@@ -1,6 +1,7 @@
 """FastAPI routes for CryptoDB."""
 
 import base64
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cryptodb.api.dependencies import get_current_user, get_db, security
 from cryptodb.auth.users import authenticate_user, create_user
 from cryptodb.auth.session import create_session
-from cryptodb.auth.rbac import require_permission
+from cryptodb.auth.rbac import has_permission, require_permission
 from cryptodb.config import settings
 from cryptodb.crypto.keystore import MasterKeyStore
 from cryptodb.compliance.reports import (
@@ -20,7 +21,7 @@ from cryptodb.compliance.reports import (
     soc2_evidence_export,
 )
 from cryptodb.db.connection import init_db
-from cryptodb.db.metadata import User
+from cryptodb.db.metadata import Record, User
 from cryptodb.engine import CryptoDBEngine
 from cryptodb.ledger.verify import TamperError, verify_ledger
 
@@ -89,7 +90,7 @@ class RegisterNodeResponse(BaseModel):
 class ReplicationPushPayload(BaseModel):
     record_id: str
     ciphertext_b64: str
-    metadata: dict
+    metadata: dict[str, Any]
     sequence_number: int
     checksum: str
 
@@ -107,7 +108,7 @@ class ReplicationAuditPayload(BaseModel):
     resource_type: str
     resource_id: str | None
     result: str
-    details: dict | None
+    details: dict[str, Any] | None
     client_ip: str | None
     session_id: str | None
     previous_hash: str
@@ -130,13 +131,13 @@ class HardwareRegisterBeginPayload(BaseModel):
 
 
 class HardwareRegisterBeginResponse(BaseModel):
-    public_credential_options: dict
+    public_credential_options: dict[str, Any]
     challenge_token: str
 
 
 class HardwareRegisterFinishPayload(BaseModel):
     challenge_token: str
-    client_response: dict
+    client_response: dict[str, Any]
 
 
 class HardwareRegisterFinishResponse(BaseModel):
@@ -145,13 +146,13 @@ class HardwareRegisterFinishResponse(BaseModel):
 
 
 class HardwareAuthenticateBeginResponse(BaseModel):
-    public_request_options: dict
+    public_request_options: dict[str, Any]
     challenge_token: str
 
 
 class HardwareAuthenticateFinishPayload(BaseModel):
     challenge_token: str
-    client_response: dict
+    client_response: dict[str, Any]
 
 
 class SealMasterKeyPayload(BaseModel):
@@ -275,7 +276,7 @@ async def init_database() -> None:
 async def register(
     payload: LoginPayload,
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     user = await create_user(session, payload.username, payload.password)
     await session.commit()
     return {"user_id": user.id, "username": user.username}
@@ -299,7 +300,7 @@ async def logout(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     from cryptodb.auth.session import revoke_token
     token = credentials.credentials
     ok = await revoke_token(session, token)
@@ -368,7 +369,7 @@ async def delete_record(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
     secure: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     engine = get_engine()
     await engine.delete(session, user, record_id, secure=secure)
     await session.commit()
@@ -416,7 +417,6 @@ async def grant_record_access(
     session: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> GrantResponse:
     from cryptodb.auth.acl import grant_access
-    from cryptodb.db.metadata import Record
     result = await session.execute(select(Record).where(Record.id == record_id))
     record = result.scalar_one_or_none()
     if record is None:
@@ -449,8 +449,8 @@ async def revoke_record_access(
     grant_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
-    from cryptodb.db.metadata import Record, RecordACL
+) -> dict[str, Any]:
+    from cryptodb.db.metadata import RecordACL
     result = await session.execute(select(Record).where(Record.id == record_id))
     record = result.scalar_one_or_none()
     if record is None:
@@ -471,8 +471,7 @@ async def list_record_grants(
     record_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
-    from cryptodb.db.metadata import Record
+) -> list[dict[str, Any]]:
     result = await session.execute(select(Record).where(Record.id == record_id))
     record = result.scalar_one_or_none()
     if record is None:
@@ -497,7 +496,7 @@ async def list_record_grants(
 async def list_audit(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     engine = get_engine()
     return await engine.audit_log(session, user)
 
@@ -507,7 +506,7 @@ async def setup_master_key(
     passphrase: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "admin")
     ks = MasterKeyStore()
     kek = ks.create_master_key(passphrase)
@@ -523,7 +522,7 @@ async def unlock_master_key(
     passphrase: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "admin")
     ks = MasterKeyStore()
     kek = ks.load_master_key(passphrase)
@@ -581,7 +580,7 @@ async def health_check() -> HealthResponse:
 async def purge_deleted(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     """Permanently purge soft-deleted records past retention period."""
     require_permission(user, "admin")
     engine = get_engine()
@@ -594,7 +593,7 @@ async def purge_deleted(
 async def verify_ledger_endpoint(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "audit")
     engine = get_engine()
     failures = await engine.verify_ledger()
@@ -613,7 +612,7 @@ async def ledger_export(
     end_date: str | None = None,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     """Export ledger entries within a date range."""
     require_permission(user, "audit")
     engine = get_engine()
@@ -671,7 +670,7 @@ async def set_user_role(
     payload: PatchRolePayload,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "admin")
     result = await session.execute(select(User).where(User.id == user_id))
     target = result.scalar_one_or_none()
@@ -687,7 +686,7 @@ async def delete_user(
     user_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "admin")
     result = await session.execute(select(User).where(User.id == user_id))
     target = result.scalar_one_or_none()
@@ -703,7 +702,7 @@ async def disable_user(
     user_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "admin")
     result = await session.execute(select(User).where(User.id == user_id))
     target = result.scalar_one_or_none()
@@ -719,7 +718,7 @@ async def gdpr_report(
     user_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "audit")
     report = await gdpr_right_to_erasure_report(session, user_id)
     return {
@@ -735,7 +734,7 @@ async def hipaa_report(
     record_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "audit")
     report = await hipaa_access_report(session, record_id)
     return {
@@ -750,7 +749,7 @@ async def hipaa_report(
 async def soc2_report(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "audit")
     report = await soc2_evidence_export(session)
     return {
@@ -762,7 +761,7 @@ async def soc2_report(
 
 
 @router.get("/metrics")
-async def metrics_endpoint():
+async def metrics_endpoint() -> Response:
     from cryptodb.api.metrics import get_metrics_response
     data, content_type = get_metrics_response()
     from fastapi import Response
@@ -773,7 +772,7 @@ async def metrics_endpoint():
 async def audit_anomalies(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     require_permission(user, "audit")
     engine = get_engine()
     entries = await engine.audit_log(session, user, run_anomaly_detection=True)
@@ -796,7 +795,7 @@ async def audit_anomalies(
 async def init_he(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     """Generate a Paillier HE keypair. Admin only."""
     require_permission(user, "admin")
     engine = get_engine()
@@ -853,7 +852,7 @@ async def unregister_standby_node(
     node_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     require_permission(user, "admin")
     repl = ReplicationEngine()
     await repl.unregister_node(session, user, node_id)
@@ -865,7 +864,7 @@ async def unregister_standby_node(
 async def list_standby_nodes(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     require_permission(user, "admin")
     repl = ReplicationEngine()
     nodes = await repl.list_nodes(session, user)
@@ -887,7 +886,7 @@ async def list_standby_nodes(
 async def replication_health_check(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     require_permission(user, "admin")
     repl = ReplicationEngine()
     outcomes = await repl.health_check_nodes(session)
@@ -902,7 +901,7 @@ async def replication_health_check(
 async def replication_retry(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     require_permission(user, "admin")
     repl = ReplicationEngine()
     logs = await repl.retry_pending(session, max_retries=settings.replication_retry_max)
@@ -926,7 +925,7 @@ async def replication_changes(
     limit: int = 100,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Pull replication: fetch changes since a sequence number."""
     require_permission(user, "admin")
     repl = ReplicationEngine()
@@ -939,7 +938,7 @@ async def replication_reset_sync(
     node_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     """Force full re-sync for a node."""
     require_permission(user, "admin")
     repl = ReplicationEngine()
@@ -952,7 +951,7 @@ async def replication_reset_sync(
 async def list_dead_letter(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List dead letter queue entries."""
     require_permission(user, "admin")
     from cryptodb.db.metadata import ReplicationDeadLetter
@@ -1009,7 +1008,7 @@ async def replication_receive_push(
 @router.post("/replication/audit")
 async def replication_receive_audit(
     payload: ReplicationAuditPayload,
-) -> dict:
+) -> dict[str, Any]:
     """Receive an audit log entry from the primary node."""
     # TODO: persist metadata snapshot to local metadata DB if desired
     return {"status": "acked", "entry_number": payload.entry_number}
@@ -1166,7 +1165,7 @@ async def unseal_master_key(
     sealed_blob_b64: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> dict[str, Any]:
     """Unseal the master key using TPM (or software fallback) and initialize engine. Admin only."""
     require_permission(user, "admin")
     from cryptodb.auth.hardware import HardwareTokenManager

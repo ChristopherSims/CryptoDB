@@ -4,13 +4,14 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import typer
 
 from cryptodb.api.main import create_app
 from cryptodb.config import settings
 from cryptodb.crypto.keystore import MasterKeyStore
-from cryptodb.db.connection import AsyncSessionLocal, init_db
+from cryptodb.db.connection import init_db
 from cryptodb.sdk.client import CryptoDBClient
 
 app = typer.Typer(help="CryptoDB — Cryptographic Database with Immutable Audit Ledger")
@@ -112,7 +113,7 @@ def serve(
     import signal
     import sys
 
-    def _handle_signal(signum, frame):  # noqa: ARG001
+    def _handle_signal(signum: Any, frame: Any) -> None:  # noqa: ARG001
         typer.echo(f"Received signal {signum}, shutting down gracefully...")
         sys.exit(0)
 

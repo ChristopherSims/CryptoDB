@@ -3,14 +3,14 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from cryptodb.config import settings
 
-_engine = None
+_engine: AsyncEngine | None = None
 
 
-def _ensure_engine():
+def _ensure_engine() -> AsyncEngine:
     """Lazy-initialize the async engine."""
     global _engine
     if _engine is None:
@@ -24,7 +24,7 @@ def _ensure_engine():
     return _engine
 
 
-def get_session_local():
+def get_session_local() -> async_sessionmaker[AsyncSession]:
     """Return a session class bound to the current engine."""
     engine = _ensure_engine()
     return async_sessionmaker(
