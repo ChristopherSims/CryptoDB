@@ -7,7 +7,6 @@ A cryptographic database with immutable audit ledger. All data is encrypted at r
 ### Install
 
 ```bash
-cd C:\Users\sims\Desktop\CryptoDB
 pip install -e ".[dev]"
 ```
 

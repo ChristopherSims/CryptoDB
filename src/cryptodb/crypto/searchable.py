@@ -49,7 +49,7 @@ class SearchableCipher:
             field_name = field_name.encode("utf-8")
         # Domain separation: field_name || plaintext
         data = field_name + b"\x00" + plaintext
-        token = hmac.new(self._key, data, hashlib.blake2b, digest_size=32).digest()
+        token = hmac.new(self._key, data, lambda d=b"": hashlib.blake2b(d, digest_size=32)).digest()
         return SearchableIndex(token=token)
 
     def encrypt_deterministic(self, plaintext: bytes, field_name: str = "") -> bytes:

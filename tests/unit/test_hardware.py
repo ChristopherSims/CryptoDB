@@ -14,7 +14,7 @@ from cryptodb.auth.hardware import (
 from cryptodb.auth.mfa import MFAChallengeStore, get_mfa_store
 from cryptodb.auth.users import create_user
 from cryptodb.config import settings
-from cryptodb.db.connection import AsyncSessionLocal, init_db
+from cryptodb.db.connection import get_session_local, init_db, reset_engine
 
 
 @pytest.fixture(autouse=True)
@@ -22,17 +22,23 @@ def temp_dirs():
     import os
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        settings.data_dir = os.path.join(tmpdir, "data")
-        settings.blob_dir = os.path.join(tmpdir, "data", "blobs")
-        settings.db_path = os.path.join(tmpdir, "data", "cryptodb.db")
-        settings.keys_dir = os.path.join(tmpdir, "data", "keys")
+        from pathlib import Path
+        settings.data_dir = Path(os.path.join(tmpdir, "data"))
+        settings.blob_dir = Path(os.path.join(tmpdir, "data", "blobs"))
+        settings.db_path = Path(os.path.join(tmpdir, "data", "cryptodb.db"))
+        settings.keys_dir = Path(os.path.join(tmpdir, "data", "keys"))
+        os.makedirs(settings.data_dir, exist_ok=True)
+        os.makedirs(settings.blob_dir, exist_ok=True)
+        os.makedirs(settings.keys_dir, exist_ok=True)
+        reset_engine()
         yield
 
 
 @pytest.fixture
 async def session():
     await init_db()
-    async with AsyncSessionLocal() as s:
+    SessionLocal = get_session_local()
+    async with SessionLocal() as s:
         yield s
         await s.rollback()
 

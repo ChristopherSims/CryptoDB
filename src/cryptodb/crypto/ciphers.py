@@ -4,7 +4,13 @@ import os
 from abc import ABC, abstractmethod
 from typing import Self
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM, XChaCha20Poly1305
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import XChaCha20Poly1305
+    _XCHACHA_AVAILABLE = True
+except ImportError:
+    _XCHACHA_AVAILABLE = False
 
 
 class Cipher(ABC):
@@ -67,6 +73,11 @@ class XChaCha20Poly1305Cipher(Cipher):
     KEY_SIZE = 32
 
     def __init__(self, key: bytes) -> None:
+        if not _XCHACHA_AVAILABLE:
+            raise RuntimeError(
+                "XChaCha20Poly1305 is not available with the installed cryptography version. "
+                "Use aes-256-gcm or install cryptography<43.0.0"
+            )
         if len(key) != self.KEY_SIZE:
             raise ValueError(f"XChaCha20-Poly1305 requires a {self.KEY_SIZE}-byte key")
         self._aead = XChaCha20Poly1305(key)

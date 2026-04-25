@@ -198,9 +198,11 @@ class CryptoDBEngine:
         if not verify_hmac(ciphertext, integ, self._integ_key):
             raise ValueError("Integrity check failed")
 
+        from cryptodb.crypto.envelope import EncryptedDataKey
+
         # Decrypt
         envelope = Envelope(
-            encrypted_dek=record.encrypted_dek,
+            encrypted_dek=EncryptedDataKey.from_dict(record.encrypted_dek),
             ciphertext=ciphertext,
             cipher_name=record.cipher_name,
             record_id=record.id,
@@ -337,9 +339,10 @@ class CryptoDBEngine:
 
     async def _persist_audit(self, session: AsyncSession) -> None:
         """Flush in-memory ledger entries to the database."""
+        from sqlalchemy import func
         entries = self._chain.get_entries()
         # Find highest persisted entry_number
-        result = await session.execute(select(AuditLog.entry_number).order_by(AuditLog.entry_number.desc()))
+        result = await session.execute(select(func.max(AuditLog.entry_number)))
         max_num = result.scalar_one_or_none() or 0
         new_entries = [e for e in entries if e.entry_number > max_num]
         audit_rows: list[AuditLog] = []

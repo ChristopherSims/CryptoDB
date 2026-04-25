@@ -271,8 +271,12 @@ class TPMBackend(HardwareTokenBackend):
         key = hashlib.sha3_256(fingerprint).digest()
         ciphertext = sealed_blob[4:]
         from cryptodb.crypto.ciphers import AES256GCM
+        from cryptography.exceptions import InvalidTag
         aes = AES256GCM(key)
-        return aes.decrypt(ciphertext)
+        try:
+            return aes.decrypt(ciphertext)
+        except InvalidTag:
+            raise ValueError("Tampered or invalid sealed blob") from None
 
     @staticmethod
     def _machine_fingerprint() -> bytes:
@@ -309,10 +313,17 @@ class HardwareTokenManager:
             )
         )
         rows = result.scalars().all()
+
+        def _b64decode_padded(s: str) -> bytes:
+            padding = 4 - len(s) % 4
+            if padding != 4:
+                s += "=" * padding
+            return base64.urlsafe_b64decode(s)
+
         return [
             FIDO2Credential(
-                credential_id=base64.urlsafe_b64decode(row.credential_id.encode()),
-                public_key=base64.urlsafe_b64decode(row.public_key.encode()),
+                credential_id=_b64decode_padded(row.credential_id),
+                public_key=_b64decode_padded(row.public_key),
                 sign_count=row.sign_count,
                 name=row.name,
             )

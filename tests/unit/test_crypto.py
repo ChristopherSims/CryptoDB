@@ -2,7 +2,7 @@
 
 import pytest
 
-from cryptodb.crypto.ciphers import AES256GCM, XChaCha20Poly1305Cipher
+from cryptodb.crypto.ciphers import AES256GCM, XChaCha20Poly1305Cipher, _XCHACHA_AVAILABLE
 from cryptodb.crypto.envelope import EnvelopeCipher
 from cryptodb.crypto.integrity import compute_hmac, verify_hmac
 from cryptodb.crypto.searchable import SearchableCipher
@@ -16,6 +16,7 @@ class TestCiphers:
         ct = cipher.encrypt(plaintext)
         assert cipher.decrypt(ct) == plaintext
 
+    @pytest.mark.skipif(not _XCHACHA_AVAILABLE, reason="XChaCha20Poly1305 not available")
     def test_xchacha20_roundtrip(self) -> None:
         key = XChaCha20Poly1305Cipher.generate_key()
         cipher = XChaCha20Poly1305Cipher.from_key(key)

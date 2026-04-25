@@ -195,11 +195,3 @@ class ReplicationLog(Base):
         Index("idx_replog_status", "status"),
         Index("idx_replog_seq", "sequence_number"),
     )
-
-
-async def init_db() -> None:
-    """Create all metadata tables."""
-    from cryptodb.db.connection import _engine
-
-    async with _engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
