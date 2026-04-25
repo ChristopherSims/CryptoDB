@@ -3,7 +3,7 @@
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -111,7 +111,7 @@ class RotationScheduler:
         """Return the next scheduled rotation time, or None."""
         if not self._state.auto_rotate or not self._state.last_rotation:
             return None
-        return self._state.last_rotation.replace(tzinfo=timezone.utc) + self._state.interval_hours * 3600  # type: ignore[operator]
+        return self._state.last_rotation.replace(tzinfo=timezone.utc) + timedelta(hours=self._state.interval_hours)
 
     def configure(self, auto_rotate: bool | None = None, interval_hours: int | None = None) -> None:
         """Update scheduler configuration."""

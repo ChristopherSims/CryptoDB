@@ -37,14 +37,17 @@ def _gf_mul(a: int, b: int) -> int:
 def _gf_inv(a: int) -> int:
     if a == 0:
         raise ZeroDivisionError("GF(2^8) inversion of zero")
-    # Extended Euclidean algorithm in GF(2^8)
-    old_r, r = a, _IRREDUCIBLE
-    old_s, s = 1, 0
-    while r != 0:
-        quotient = old_r // r
-        old_r, r = r, old_r ^ _gf_mul(quotient, r)
-        old_s, s = s, old_s ^ _gf_mul(quotient, s)
-    return old_s & 0xFF
+    # Fermat's little theorem: a^(-1) = a^(254) in GF(2^8)*
+    # Compute via square-and-multiply
+    result = 1
+    power = a
+    exp = 254
+    while exp > 0:
+        if exp & 1:
+            result = _gf_mul(result, power)
+        power = _gf_mul(power, power)
+        exp >>= 1
+    return result
 
 
 def _eval_poly(coeffs: list[int], x: int) -> int:
