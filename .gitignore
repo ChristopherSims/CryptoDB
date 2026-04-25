@@ -38,3 +38,5 @@ keys/
 secrets/
 .hermes/*
 .hermes
+.hermes/plans/*
+.hermes/plans
