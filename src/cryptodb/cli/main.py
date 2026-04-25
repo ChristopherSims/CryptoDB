@@ -338,6 +338,117 @@ def ledger_export(
     asyncio.run(_run())
 
 
+@app.command()
+def key_versions(
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """List master key versions (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.list_key_versions()
+        typer.echo(f"Active: {result['active']}")
+        for v in result["versions"]:
+            marker = " *" if v == result["active"] else ""
+            typer.echo(f"  {v}{marker}")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def rotate_key(
+    passphrase: str = typer.Option(..., prompt=True, hide_input=True),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Rotate the master key and re-encrypt all records (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.rotate_key(passphrase)
+        typer.echo(f"Rotated to {result['new_key_id']} ({result['rotated_records']} records)")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def recovery_split(
+    threshold: int = typer.Option(..., "--threshold"),
+    total_shares: int = typer.Option(..., "--shares"),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+    passphrase: str = typer.Option(..., prompt=True, hide_input=True),
+) -> None:
+    """Split the master key into Shamir shares (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.recovery_split(passphrase, threshold, total_shares)
+        for i, share in enumerate(result["shares"], 1):
+            typer.echo(f"Share {i}: {share}")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def recovery_combine(
+    shares: list[str] = typer.Argument(..., help="Shamir shares (base64-encoded)"),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Combine Shamir shares to recover the master key (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.recovery_combine(shares)
+        typer.echo(f"Recovered: {result['key_id']} ({result['status']})")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def scheduler_status(
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Show key rotation scheduler status (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.scheduler_status()
+        typer.echo(f"Auto-rotate: {result['auto_rotate']}")
+        typer.echo(f"Interval: {result['interval_hours']}h")
+        typer.echo(f"Last rotation: {result.get('last_rotation', 'N/A')}")
+        typer.echo(f"Next rotation: {result.get('next_rotation', 'N/A')}")
+        await client.close()
+    asyncio.run(_run())
+
+
+@app.command()
+def scheduler_config(
+    auto_rotate: bool = typer.Option(..., "--auto-rotate/--no-auto-rotate"),
+    interval_hours: int = typer.Option(168, "--interval-hours"),
+    base_url: str = typer.Option("http://127.0.0.1:8000/api/v1", "--url", "-u"),
+    username: str = typer.Option(..., "--username"),
+    password: str = typer.Option(..., "--password", prompt=True, hide_input=True),
+) -> None:
+    """Configure key rotation scheduler (admin only)."""
+    async def _run() -> None:
+        client = CryptoDBClient(base_url)
+        await client.login(username, password)
+        result = await client.scheduler_config(auto_rotate=auto_rotate, interval_hours=interval_hours)
+        typer.echo(f"Auto-rotate: {result['auto_rotate']}")
+        typer.echo(f"Interval: {result['interval_hours']}h")
+        await client.close()
+    asyncio.run(_run())
+
+
 def main() -> None:
     app()
 

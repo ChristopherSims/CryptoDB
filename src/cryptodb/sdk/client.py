@@ -442,4 +442,77 @@ class CryptoDBClient:
         r.raise_for_status()
         return r.json()
 
+    # ------------------------------------------------------------------
+    # Key management
+    # ------------------------------------------------------------------
+
+    async def list_key_versions(self) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.get(
+            f"{self._base}/master-key/versions",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def rotate_key(self, passphrase: str) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/master-key/rotate",
+            json={"passphrase": passphrase},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def recovery_split(self, passphrase: str, threshold: int, total_shares: int) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/master-key/recovery/split",
+            json={"passphrase": passphrase, "threshold": threshold, "total_shares": total_shares},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def recovery_combine(self, shares: list[str]) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.post(
+            f"{self._base}/master-key/recovery/combine",
+            json={"shares": shares},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def scheduler_status(self) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        r = await self._client.get(
+            f"{self._base}/master-key/scheduler",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def scheduler_config(self, auto_rotate: bool | None = None, interval_hours: int | None = None) -> dict:
+        if self._token is None:
+            raise RuntimeError("Not authenticated")
+        payload: dict = {}
+        if auto_rotate is not None:
+            payload["auto_rotate"] = auto_rotate
+        if interval_hours is not None:
+            payload["interval_hours"] = interval_hours
+        r = await self._client.post(
+            f"{self._base}/master-key/scheduler",
+            json=payload,
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
 
