@@ -88,7 +88,12 @@ async def rotate_refresh_token(session: AsyncSession, refresh_token: str) -> tup
         )
     )
     db_session = result.scalar_one_or_none()
-    if db_session is None or db_session.expires_at < datetime.now(timezone.utc):
+    if db_session is None:
+        return None
+    expires_at = db_session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
         return None
 
     # Revoke old session

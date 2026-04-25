@@ -28,7 +28,10 @@ def secure_delete_file(path: str | os.PathLike, passes: int = 3) -> None:
     except FileNotFoundError:
         pass
     finally:
-        os.remove(file_path)
+        try:
+            os.remove(file_path)
+        except FileNotFoundError:
+            pass
 
 
 def shred_envelope(envelope: Envelope) -> None:
